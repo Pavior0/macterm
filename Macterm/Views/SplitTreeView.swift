@@ -211,10 +211,12 @@ struct SplitDividerView<First: View, Second: View>: View {
                         .frame(width: h ? offset : nil, height: h ? nil : offset)
                         .allowsHitTesting(false)
 
-                    SplitResizeBand(
-                        horizontal: h,
-                        axisLength: total,
-                        ratioAtDragStart: { branch.ratio },
+                    ResizeDragBand(
+                        axis: h ? .horizontal : .vertical,
+                        valueAtDragStart: { branch.ratio },
+                        resizedValue: { start, delta in
+                            SplitDividerMetrics.draggedRatio(start: start, delta: delta, total: total)
+                        },
                         onResize: { branch.ratio = $0 }
                     )
                     .frame(
@@ -256,22 +258,56 @@ enum SplitDividerMetrics {
     }
 }
 
-/// The divider's drag target: a transparent AppKit view sized to a comfortable
-/// grab band and layered above the panes.
+enum ResizeDragAxis {
+    case horizontal
+    case vertical
+
+    fileprivate var cursor: NSCursor {
+        switch self {
+        case .horizontal: .resizeLeftRight
+        case .vertical: .resizeUpDown
+        }
+    }
+
+    /// Convert AppKit's Y-up window coordinates into the layout's down-positive
+    /// vertical axis. Horizontal coordinates already grow in the same direction.
+    func delta(from origin: NSPoint, to current: NSPoint) -> CGFloat {
+        switch self {
+        case .horizontal: current.x - origin.x
+        case .vertical: origin.y - current.y
+        }
+    }
+}
+
+/// Shared transparent AppKit drag target for split and sidebar resize bands.
 ///
-/// AppKit rather than a SwiftUI `DragGesture` because the panes it covers are
-/// `GhosttyTerminalNSView`s, which handle `mouseDown` themselves and win AppKit
-/// hit testing against any SwiftUI gesture underneath them.
-private struct SplitResizeBand: NSViewRepresentable {
-    let horizontal: Bool
-    /// The container's size along the split axis, which is what turns the
-    /// drag's distance in points into a ratio.
-    let axisLength: CGFloat
-    /// Read once at mouse-down, so the whole drag is measured from a single
-    /// origin instead of accumulating against a divider that moves with it.
-    let ratioAtDragStart: () -> CGFloat
-    /// The ratio the drag has reached, already clamped.
+/// AppKit rather than a SwiftUI `DragGesture` so the band keeps receiving a
+/// drag after the pointer leaves its narrow bounds and can sit over terminal
+/// NSViews that win AppKit hit testing. The band claims only the left-button
+/// drag; scrolling and other mouse buttons pass through to the view beneath it.
+struct ResizeDragBand: NSViewRepresentable {
+    let axis: ResizeDragAxis
+    /// Read once at mouse-down, so the drag is measured from a stable value.
+    let valueAtDragStart: () -> CGFloat
+    /// Convert the captured start value and current drag delta into the new
+    /// caller-specific value (split ratio or sidebar width).
+    let resizedValue: (CGFloat, CGFloat) -> CGFloat
     let onResize: (CGFloat) -> Void
+    let onResizeStateChanged: (Bool) -> Void
+
+    init(
+        axis: ResizeDragAxis,
+        valueAtDragStart: @escaping () -> CGFloat,
+        resizedValue: @escaping (CGFloat, CGFloat) -> CGFloat,
+        onResize: @escaping (CGFloat) -> Void,
+        onResizeStateChanged: @escaping (Bool) -> Void = { _ in }
+    ) {
+        self.axis = axis
+        self.valueAtDragStart = valueAtDragStart
+        self.resizedValue = resizedValue
+        self.onResize = onResize
+        self.onResizeStateChanged = onResizeStateChanged
+    }
 
     func makeNSView(context _: Context) -> BandView {
         let view = BandView()
@@ -284,34 +320,36 @@ private struct SplitResizeBand: NSViewRepresentable {
     }
 
     private func configure(_ view: BandView) {
-        view.horizontal = horizontal
-        view.axisLength = axisLength
-        view.ratioAtDragStart = ratioAtDragStart
+        view.axis = axis
+        view.valueAtDragStart = valueAtDragStart
+        view.resizedValue = resizedValue
         view.onResize = onResize
+        view.onResizeStateChanged = onResizeStateChanged
     }
 
     final class BandView: NSView {
-        var horizontal = true
-        var axisLength: CGFloat = 0
-        var ratioAtDragStart: () -> CGFloat = { 0.5 }
+        var axis: ResizeDragAxis = .horizontal
+        var valueAtDragStart: () -> CGFloat = { 0 }
+        var resizedValue: (CGFloat, CGFloat) -> CGFloat = { start, delta in start + delta }
         var onResize: (CGFloat) -> Void = { _ in }
+        var onResizeStateChanged: (Bool) -> Void = { _ in }
 
         /// Where the press that started the current drag landed, in WINDOW
         /// coordinates: the band itself travels with the divider mid-drag, so a
         /// view-local origin would move out from under the measurement.
         private var dragOrigin: NSPoint?
-        /// The ratio that drag started from — kept here rather than in SwiftUI
+        /// The value that drag started from — kept here rather than in SwiftUI
         /// state, which wouldn't be guaranteed to have flowed back through
         /// `updateNSView` before the first `mouseDragged` arrives.
-        private var startRatio: CGFloat = 0.5
+        private var startValue: CGFloat = 0
+        /// The press that opened the current drag, kept so a click that never
+        /// became a drag can be handed to the view underneath on release.
+        private var pressEvent: NSEvent?
+        private var didDrag = false
 
         /// Set while resolving what the band is covering, so its own `hitTest`
         /// steps aside and the view underneath answers instead.
         private var isTransparentToHitTest = false
-
-        private var cursor: NSCursor {
-            horizontal ? .resizeLeftRight : .resizeUpDown
-        }
 
         override var mouseDownCanMoveWindow: Bool { false }
 
@@ -336,38 +374,67 @@ private struct SplitResizeBand: NSViewRepresentable {
         /// close, zoom toggle, tab switch), which the SwiftUI `onHover` path
         /// this replaced had to unwind by hand.
         override func cursorUpdate(with _: NSEvent) {
-            cursor.set()
+            axis.cursor.set()
         }
 
         override func mouseDown(with event: NSEvent) {
             dragOrigin = event.locationInWindow
-            startRatio = ratioAtDragStart()
+            startValue = valueAtDragStart()
+            pressEvent = event
+            didDrag = false
+            onResizeStateChanged(true)
         }
 
         override func mouseDragged(with event: NSEvent) {
             guard let dragOrigin else { return }
-            let now = event.locationInWindow
-            // Window space is Y-up; the layout (and so the ratio) grows
-            // downward, so a vertical split reads the delta inverted.
-            let delta = horizontal ? now.x - dragOrigin.x : dragOrigin.y - now.y
+            didDrag = true
+            let delta = axis.delta(from: dragOrigin, to: event.locationInWindow)
             // Hold the resize cursor for the duration: dragging routinely
             // wanders off the band, and `cursorUpdate` only fires for
             // mouse-moved events, which a drag doesn't produce.
-            cursor.set()
-            onResize(SplitDividerMetrics.draggedRatio(start: startRatio, delta: delta, total: axisLength))
+            axis.cursor.set()
+            onResize(resizedValue(startValue, delta))
         }
 
-        override func mouseUp(with _: NSEvent) {
+        override func mouseUp(with event: NSEvent) {
+            let press = pressEvent
+            let moved = didDrag
+            finishResize()
+            // A press that never moved isn't a resize. The band sits ON the
+            // view it covers — for the sidebar overlay that is the row list,
+            // whose trailing points would otherwise be dead to selection — so
+            // hand the click down, the same way scroll and right-click already
+            // go through `viewBeneath`. The release is queued FIRST: a target
+            // that tracks inside `mouseDown` then reads it immediately instead
+            // of blocking on the next event.
+            guard !moved, let press, let target = viewBeneath(press) else { return }
+            NSApp.postEvent(event, atStart: true)
+            target.mouseDown(with: press)
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            // A style switch or shortcut can remove the overlay mid-drag. End
+            // the shared lifecycle here so its owner never stays permanently
+            // stuck in a resizing state after this view disappears.
+            if newWindow == nil { finishResize() }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        private func finishResize() {
+            guard dragOrigin != nil else { return }
             dragOrigin = nil
+            pressEvent = nil
+            didDrag = false
+            onResizeStateChanged(false)
         }
 
         // MARK: - Pass-through
 
         // The band claims the left button — the resize drag — and nothing
-        // else. Scrolling or right-clicking a few points from a divider still
-        // belongs to the pane the band is sitting on, and AppKit would
-        // otherwise drop those events: the responder chain runs up through the
-        // band's ancestors, never across to the sibling underneath it.
+        // else. Scrolling or right-clicking a few points from a resize edge
+        // still belongs to the view underneath, and AppKit would otherwise drop
+        // those events: the responder chain runs up through the band's
+        // ancestors, never across to the sibling underneath it.
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             isTransparentToHitTest ? nil : super.hitTest(point)

@@ -481,6 +481,17 @@ enum WindowAppearance {
     /// user drag owns and which the peek's expand restores.
     private static var didRestoreSidebarWidth = false
 
+    /// The actual native sidebar state after AppKit has restored its split-view
+    /// autosave. SwiftUI's `columnVisibility` binding can still say `.automatic`
+    /// while this item is collapsed, so launch-time hover must synchronize from
+    /// this native value rather than trusting the binding.
+    static func sidebarIsVisible(window: NSWindow) -> Bool? {
+        guard let split = window.contentView?.firstSplitView,
+              let sidebar = split.owningSplitViewController?.splitViewItems.first
+        else { return nil }
+        return !sidebar.isCollapsed
+    }
+
     private static func restoreSidebarWidth(window: NSWindow) {
         guard !didRestoreSidebarWidth,
               let split = window.contentView?.firstSplitView,
@@ -501,6 +512,27 @@ enum WindowAppearance {
         let width = CGFloat(Preferences.shared.launchSidebarWidth)
         split.setPosition(width, ofDividerAt: 0)
         logger.info("sidebar width restored to \(width, privacy: .public)")
+    }
+
+    /// Move the live main-window sidebar divider to an explicit width.
+    ///
+    /// The overlay uses the same persisted width as the native column, but the
+    /// split view also keeps an independent in-session metric. Applying the
+    /// overlay's width when it is promoted prevents that stale metric from
+    /// winning and writing itself back through `MainWindow`'s geometry hook.
+    @discardableResult
+    static func setSidebarWidth(_ width: CGFloat, window: NSWindow) -> Bool {
+        guard let split = window.contentView?.firstSplitView,
+              split.arrangedSubviews.count > 1,
+              let sidebar = split.owningSplitViewController?.splitViewItems.first,
+              !sidebar.isCollapsed
+        else { return false }
+
+        let range = Preferences.sidebarWidthRange
+        let clamped = min(max(width, CGFloat(range.lowerBound)), CGFloat(range.upperBound))
+        sidebar.maximumThickness = CGFloat(range.upperBound)
+        split.setPosition(clamped, ofDividerAt: 0)
+        return true
     }
 
     /// Cap the sidebar column at `Preferences.sidebarWidthRange`'s upper bound.
@@ -839,9 +871,16 @@ enum WindowAppearance {
     /// The window's private corner radius, so the glass clips to the same
     /// rounded corners as the window. Falls back to nil (square) if the SPI
     /// is unavailable.
-    private static func windowCornerRadius(_ window: NSWindow) -> CGFloat? {
-        guard window.responds(to: Selector(("_cornerRadius"))) else { return nil }
-        return window.value(forKey: "_cornerRadius") as? CGFloat
+    static func windowCornerRadius(_ window: NSWindow) -> CGFloat? {
+        if window.responds(to: Selector(("_cornerRadius"))),
+           let radius = window.value(forKey: "_cornerRadius") as? CGFloat
+        {
+            return radius
+        }
+        // Older AppKit builds can expose the applied corner only on the theme
+        // frame's backing layer. It is still system-owned geometry, not a
+        // guessed OS-version constant.
+        return window.contentView?.superview?.layer?.cornerRadius
     }
 
     /// Apply the Hide Title Bar option (#226) to the window: hide the titlebar
