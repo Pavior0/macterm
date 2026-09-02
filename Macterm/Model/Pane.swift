@@ -72,6 +72,9 @@ final class Pane: Identifiable {
     /// sidebar every tick.
     private(set) var foregroundSample: ForegroundSample?
 
+    /// Latest working directory reported by OSC 7. nil before the shell reports one.
+    private(set) var reportedWorkingDirectory: String?
+
     /// The basename of the pane's live foreground process — a running command
     /// (`hx`, `btop`), or the pane's shell when idle at a prompt (so a nested
     /// `zsh` launched inside `nu` shows `zsh`). This is the tab name's
@@ -143,6 +146,12 @@ final class Pane: Identifiable {
 
     func requestSurfaceReattach() {
         surfaceReattachTick &+= 1
+    }
+
+    /// Records an OSC 7 working directory on observable pane state.
+    func receiveReportedWorkingDirectory(_ workingDirectory: String) {
+        guard !workingDirectory.isEmpty, workingDirectory != reportedWorkingDirectory else { return }
+        reportedWorkingDirectory = workingDirectory
     }
 
     var executionState: TerminalExecutionState = .idle {
@@ -729,6 +738,7 @@ final class Pane: Identifiable {
         // triggered by destroySurface() itself can't re-enter.
         view.onProcessExit = nil
         view.onTitleChange = nil
+        view.onWorkingDirectoryChange = nil
         view.onSearchStart = nil
         view.onSearchEnd = nil
         view.onSearchTotal = nil
@@ -827,6 +837,22 @@ final class Pane: Identifiable {
 
     var sidebarSegmentTitle: String {
         displayTitle
+    }
+
+    /// Returns the sidebar title with cwd relative to the containing project.
+    func sidebarSegmentTitle(projectDirectory: String?) -> String {
+        guard Preferences.shared.autoNameTabs,
+              !isRemote,
+              let projectDirectory,
+              case .some(.local) = ProjectPath.parse(projectDirectory)
+        else { return displayTitle }
+
+        return SidebarTabTitle.automaticTitle(
+            activityTitle: displayTitle,
+            foregroundIsShell: programTitle == nil && (foregroundSample?.isIdleShell ?? true),
+            workingDirectory: reportedWorkingDirectory ?? projectPath,
+            projectDirectory: projectDirectory
+        )
     }
 
     init(

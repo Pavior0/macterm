@@ -47,7 +47,10 @@ final class GhosttyCallbacks: @unchecked Sendable {
         case GHOSTTY_ACTION_PWD:
             guard let view = surfaceView(from: target), let ptr = action.action.pwd.pwd else { return true }
             let pwd = String(cString: ptr)
-            DispatchQueue.main.async { view.currentPwd = pwd }
+            DispatchQueue.main.async {
+                view.currentPwd = pwd
+                view.onWorkingDirectoryChange?(pwd)
+            }
             return true
         case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
             guard let view = surfaceView(from: target) else { return true }

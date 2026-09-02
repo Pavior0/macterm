@@ -276,6 +276,9 @@ private struct TerminalSurface: NSViewRepresentable {
         // foreground process, and — when a real program (not the shell) holds
         // the foreground — becomes the pane's display title.
         view.onTitleChange = { [weak pane] title in pane?.receiveReportedTitle(title) }
+        view.onWorkingDirectoryChange = { [weak pane] directory in
+            pane?.receiveReportedWorkingDirectory(directory)
+        }
         view.isFocused = focused
 
         view.onSearchStart = { [weak pane, weak view] needle in

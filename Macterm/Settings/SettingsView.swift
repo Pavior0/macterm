@@ -1153,7 +1153,7 @@ private struct AppearanceSettings: View {
                     .onChange(of: autoNameTabs) { _, v in
                         Preferences.shared.autoNameTabs = v
                     }
-                Text("Names tabs after the running program. When off, tabs show the shell or host name.")
+                Text("Shows subdirectories and running programs in tab titles. When off, tabs show the shell or host name.")
                     .settingsCaption()
 
                 Toggle("Show AI agent icons", isOn: $showAgentIcons)

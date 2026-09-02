@@ -406,6 +406,7 @@ struct SidebarContent: View {
                     tab: tab,
                     index: index + 1,
                     iconSymbolOverride: "pin",
+                    projectDirectory: nil,
                     selectionItem: .tab(projectID: PinnedTabs.projectID, tabID: record.id),
                     presentation: presentation,
                     isInteractive: isInteractive,
@@ -504,6 +505,7 @@ struct SidebarContent: View {
         SidebarTabRow(
             tab: tab,
             index: tabIndex + 1,
+            projectDirectory: project.path,
             selectionItem: .tab(projectID: project.id, tabID: tab.id),
             presentation: presentation,
             isInteractive: isInteractive,
@@ -1062,6 +1064,7 @@ private struct SidebarTabRow: View {
     /// Fixed icon overriding the user's `tabIconSymbol` preference — the
     /// pinned rows pass "pin" so the icon itself marks the row's kind.
     var iconSymbolOverride: String?
+    let projectDirectory: String?
     let selectionItem: SidebarItem
     @Bindable
     var presentation: SidebarPresentationState
@@ -1096,7 +1099,7 @@ private struct SidebarTabRow: View {
                 .onExitCommand { cancelRename() }
                 .onAppear { focused = true }
         } else {
-            TabRowTitle(tab: tab)
+            TabRowTitle(tab: tab, projectDirectory: projectDirectory)
                 .inlineRenameClickTarget(onSelect: select, onBeginRename: beginRename)
         }
     }
@@ -1282,18 +1285,19 @@ private struct UnloadedRowStyle: ViewModifier {
 
 private struct TabRowTitle: View {
     let tab: TerminalTab
+    let projectDirectory: String?
 
     var body: some View {
         if tab.customTitle == nil, (2 ... 3).contains(tab.splitRoot.allPanes().count) {
             HStack(spacing: 10) {
                 ForEach(Array(tab.splitRoot.allPanes().enumerated()), id: \.element.id) { i, pane in
                     if i > 0 { Divider() }
-                    FadingText(pane.sidebarSegmentTitle)
+                    FadingText(pane.sidebarSegmentTitle(projectDirectory: projectDirectory))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         } else {
-            FadingText(tab.sidebarRowTitle)
+            FadingText(tab.sidebarRowTitle(projectDirectory: projectDirectory))
         }
     }
 }

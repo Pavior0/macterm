@@ -46,14 +46,12 @@ final class SurfaceIncubator {
         scroll.frame = content.bounds
         content.addSubview(scroll)
         scroll.layoutSubtreeIfNeeded()
-        // Wire the title callback so an off-screen pane refreshes its
-        // foreground-process name (the tab name) on each command boundary before
-        // the tab is ever viewed. The rest of the callbacks are UI-coupled and
-        // are wired by `TerminalSurface.configure` when SwiftUI adopts the view;
-        // `configure` re-sets `onTitleChange` to the same effect, so this isn't
-        // clobbered in a way that matters. (`currentPwd` is set directly by the
-        // callback dispatcher, so it already works off-screen.)
+        // Publish title and cwd changes before the tab is first viewed. The
+        // visible terminal wires the same callbacks when it adopts the view.
         pane.nsView?.onTitleChange = { [weak pane] title in pane?.receiveReportedTitle(title) }
+        pane.nsView?.onWorkingDirectoryChange = { [weak pane] directory in
+            pane?.receiveReportedWorkingDirectory(directory)
+        }
         pane.nsView?.createSurface()
     }
 }
