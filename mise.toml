@@ -90,6 +90,28 @@ run = """
   fi
 """
 
+[tasks.dev-install]
+description = "Build and install Macterm Dev alongside the release app"
+depends = ["format", "lint", "test"]
+usage = 'flag "-v --verbose" help="Stream raw output instead of the spinner"'
+run = """
+  source scripts/_lib.sh
+  install_dev_build() {
+    MACTERM_BUILD_DIR="$PWD/build/dev" \
+    MACTERM_BUILD_BUNDLE_ID="com.thdxg.macterm.dev" \
+    MACTERM_BUILD_DISPLAY_NAME="Macterm Dev" \
+      ./scripts/build.sh
+    MACTERM_INSTALL_SOURCE_APP="$PWD/build/dev/export/Macterm.app" \
+    MACTERM_INSTALL_DESTINATION_APP="/Applications/Macterm Dev.app" \
+      ./scripts/install.sh
+  }
+  if [[ "$usage_verbose" == "true" ]]; then
+    install_dev_build
+  else
+    run_step "Building and installing Macterm Dev..." install_dev_build
+  fi
+"""
+
 [tasks.setup]
 description = "Download GhosttyKit framework and resources"
 usage = 'flag "-v --verbose" help="Stream raw output instead of the spinner"'

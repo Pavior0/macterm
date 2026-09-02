@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$PWD"
-BUILD_DIR="$PROJECT_ROOT/build"
+BUILD_DIR="${MACTERM_BUILD_DIR:-$PROJECT_ROOT/build}"
 VERSION="${VERSION:-0.0.0}"
 
 # shellcheck source=scripts/_lib.sh
@@ -39,6 +39,13 @@ SIGNING_OVERRIDES=()
 if [[ -n "$CODESIGN_IDENTITY" ]]; then
   SIGNING_OVERRIDES+=(CODE_SIGN_IDENTITY="$CODESIGN_IDENTITY")
 fi
+BUILD_IDENTITY_OVERRIDES=()
+if [[ -n "${MACTERM_BUILD_BUNDLE_ID:-}" ]]; then
+  BUILD_IDENTITY_OVERRIDES+=(PRODUCT_BUNDLE_IDENTIFIER="$MACTERM_BUILD_BUNDLE_ID")
+fi
+if [[ -n "${MACTERM_BUILD_DISPLAY_NAME:-}" ]]; then
+  BUILD_IDENTITY_OVERRIDES+=(PRODUCT_DISPLAY_NAME="$MACTERM_BUILD_DISPLAY_NAME")
+fi
 DMG_NAME="Macterm-${VERSION}.dmg"
 DERIVED_DATA="$BUILD_DIR/DerivedData"
 ARCHIVE_PATH="$BUILD_DIR/Macterm.xcarchive"
@@ -70,6 +77,7 @@ xcodebuild \
   GIT_COMMIT="$GIT_COMMIT" \
   MACTERM_UPDATE_CHANNEL="$MACTERM_UPDATE_CHANNEL" \
   SPARKLE_ED_PUBLIC_KEY="$SPARKLE_ED_PUBLIC_KEY" \
+  ${BUILD_IDENTITY_OVERRIDES[@]+"${BUILD_IDENTITY_OVERRIDES[@]}"} \
   ${SIGNING_OVERRIDES[@]+"${SIGNING_OVERRIDES[@]}"} \
   archive \
   | (xcbeautify --quiet 2>/dev/null || cat)
@@ -117,4 +125,4 @@ rm -f "$BUILD_DIR/$DMG_NAME"
 hdiutil create -volname "Macterm" -srcfolder "$DMG_STAGING" -ov -format UDZO "$BUILD_DIR/$DMG_NAME"
 rm -rf "$DMG_STAGING"
 
-echo "Done: build/$DMG_NAME"
+echo "Done: $BUILD_DIR/$DMG_NAME"
