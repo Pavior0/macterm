@@ -886,8 +886,12 @@ struct WorkspaceView: View {
                 projectID: project.id,
                 onFocusPane: { appState.focusPane($0, projectID: project.id) },
                 onSplit: { paneID, dir in
-                    tab.split(paneID: paneID, direction: dir)
-                    appState.saveWorkspaces()
+                    appState.splitPane(
+                        paneID,
+                        direction: dir,
+                        projectID: project.id,
+                        projectDirectory: project.path
+                    )
                 },
                 // This closure is the PROCESS-EXIT path only (SplitTreeView
                 // wires it to the surface's onProcessExit; the user's Cmd+W

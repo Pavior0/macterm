@@ -39,7 +39,7 @@ struct AppStateTests {
     // MARK: - Tabs
 
     @Test
-    func createTab_uses_active_local_cwd_and_remote_project_fallback() throws {
+    func createTab_uses_selected_directory_and_preserves_project_session_slug() throws {
         let prior = Preferences.shared.newTabWorkingDirectory
         defer { Preferences.shared.newTabWorkingDirectory = prior }
         Preferences.shared.newTabWorkingDirectory = .activePaneDirectory
@@ -53,11 +53,29 @@ struct AppStateTests {
         state.createTab(projectID: localProject.id, projects: [localProject])
 
         #expect(localWorkspace.activeTab?.focusedPane?.projectPath == "/project/src")
+        #expect(localWorkspace.activeTab?.focusedPane?.sessionSlug == "project")
 
-        let remoteProject = seedProject(state, name: "remote", path: "devbox:~/repo")
+        let inheritedPane = try #require(localWorkspace.activeTab?.focusedPane)
+        inheritedPane.ensureNSView().currentPwd = "/project/src/deep"
+        Preferences.shared.newTabWorkingDirectory = .projectDirectory
+
+        state.createTab(projectID: localProject.id, projects: [localProject])
+
+        #expect(localWorkspace.activeTab?.focusedPane?.projectPath == localProject.path)
+        #expect(localWorkspace.activeTab?.focusedPane?.sessionSlug == "project")
+    }
+
+    @Test
+    func createTab_remote_active_pane_falls_back_to_project_directory() throws {
+        let prior = Preferences.shared.newTabWorkingDirectory
+        defer { Preferences.shared.newTabWorkingDirectory = prior }
+        Preferences.shared.newTabWorkingDirectory = .activePaneDirectory
+
+        let state = makeAppState()
+        let remoteProject = seedProject(state, path: "devbox:~/repo")
         let remoteWorkspace = try #require(state.workspaces[remoteProject.id])
 
-        state.createTab(projectID: remoteProject.id, projects: [localProject, remoteProject])
+        state.createTab(projectID: remoteProject.id, projects: [remoteProject])
 
         #expect(remoteWorkspace.activeTab?.focusedPane?.projectPath == remoteProject.path)
     }
@@ -73,6 +91,31 @@ struct AppStateTests {
         state.splitPane(direction: .horizontal, projectID: p.id)
         #expect(tab.splitRoot.allPanes().count == 2)
         #expect(tab.focusedPaneID != before)
+    }
+
+    @Test
+    func splitPane_uses_selected_directory() throws {
+        let prior = Preferences.shared.newSplitWorkingDirectory
+        defer { Preferences.shared.newSplitWorkingDirectory = prior }
+        Preferences.shared.newSplitWorkingDirectory = .activePaneDirectory
+
+        let state = makeAppState()
+        let project = seedProject(state, path: "/project")
+        let tab = try #require(state.workspaces[project.id]?.activeTab)
+        let activePane = try #require(tab.focusedPane)
+        activePane.ensureNSView().currentPwd = "/project/src"
+
+        state.splitPane(direction: .horizontal, projectID: project.id, projects: [project])
+
+        #expect(tab.focusedPane?.projectPath == "/project/src")
+
+        let inheritedPane = try #require(tab.focusedPane)
+        inheritedPane.ensureNSView().currentPwd = "/project/src/deep"
+        Preferences.shared.newSplitWorkingDirectory = .projectDirectory
+
+        state.splitPane(direction: .vertical, projectID: project.id, projects: [project])
+
+        #expect(tab.focusedPane?.projectPath == project.path)
     }
 
     @Test
