@@ -36,6 +36,32 @@ struct AppStateTests {
         return p
     }
 
+    // MARK: - Tabs
+
+    @Test
+    func createTab_uses_active_local_cwd_and_remote_project_fallback() throws {
+        let prior = Preferences.shared.newTabWorkingDirectory
+        defer { Preferences.shared.newTabWorkingDirectory = prior }
+        Preferences.shared.newTabWorkingDirectory = .activePaneDirectory
+
+        let state = makeAppState()
+        let localProject = seedProject(state, path: "/project")
+        let localWorkspace = try #require(state.workspaces[localProject.id])
+        let activePane = try #require(localWorkspace.activeTab?.focusedPane)
+        activePane.ensureNSView().currentPwd = "/project/src"
+
+        state.createTab(projectID: localProject.id, projects: [localProject])
+
+        #expect(localWorkspace.activeTab?.focusedPane?.projectPath == "/project/src")
+
+        let remoteProject = seedProject(state, name: "remote", path: "devbox:~/repo")
+        let remoteWorkspace = try #require(state.workspaces[remoteProject.id])
+
+        state.createTab(projectID: remoteProject.id, projects: [localProject, remoteProject])
+
+        #expect(remoteWorkspace.activeTab?.focusedPane?.projectPath == remoteProject.path)
+    }
+
     // MARK: - Splits
 
     @Test

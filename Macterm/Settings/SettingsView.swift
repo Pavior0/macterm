@@ -445,6 +445,7 @@ private struct GeneralSettings: View {
     @State private var autoTilingEnabled: Bool = Preferences.shared.autoTilingEnabled
     @State private var backgroundSSHConnections: Bool = Preferences.shared.backgroundSSHConnections
     @State private var reconnectRemotePanes: Bool = Preferences.shared.reconnectRemotePanes
+    @State private var newTabWorkingDirectory: NewTabWorkingDirectory = Preferences.shared.newTabWorkingDirectory
 
     /// Why session persistence is inactive, when it is. Missing binary is a
     /// dev-build state; an over-budget socket path is an environment problem
@@ -546,6 +547,15 @@ private struct GeneralSettings: View {
             }
 
             Section("Terminal") {
+                Picker("New tab directory", selection: $newTabWorkingDirectory) {
+                    ForEach(NewTabWorkingDirectory.allCases) { directory in
+                        Text(directory.displayName).tag(directory)
+                    }
+                }
+                .onChange(of: newTabWorkingDirectory) { _, directory in
+                    Preferences.shared.newTabWorkingDirectory = directory
+                }
+
                 SettingsSlider(
                     label: "Scroll speed",
                     value: $terminalScrollSpeed,

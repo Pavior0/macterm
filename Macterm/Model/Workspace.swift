@@ -139,9 +139,7 @@ final class TerminalTab: Identifiable {
         // prefix — inheriting it would spawn the sibling as a LOCAL shell in a
         // bogus dir instead of a remote zmx session — so skip the live cwd and
         // inherit the scp-style `projectPath` verbatim.
-        let livePwd = pane.isRemote
-            ? nil
-            : (pane.nsView?.currentPwd ?? ProcessInspector.foregroundWorkingDirectory(forPane: pane))
+        let livePwd = pane.liveLocalWorkingDirectory()
         let sourcePath = livePwd ?? pane.projectPath
         let sourceProjectID = pane.projectID
         let (newRoot, newID) = splitRoot.splitting(
