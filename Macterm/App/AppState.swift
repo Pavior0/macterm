@@ -986,9 +986,8 @@ final class AppState {
     /// and wants new tabs / persisted state to start there.
     ///
     /// No-op when there's no active project or no resolvable pwd. We don't
-    /// touch open panes or workspaces — those keep their current cwd; only
-    /// future tabs created via `createTab(projectID:projects:)` (which reads
-    /// `project.path`) will land in the new directory.
+    /// touch open panes or workspaces. They keep their current cwd. Future tabs
+    /// use the new directory when "New tab directory" is set to Project.
     func replaceProjectPathWithCurrentDir(projectStore: ProjectStore) {
         guard let projectID = activeProjectID,
               let project = projectStore.projects.first(where: { $0.id == projectID }),
@@ -1209,18 +1208,23 @@ final class AppState {
         return tab.id
     }
 
-    /// Convenience overload: look up the project's canonical path from the
-    /// given projects list so new tabs always land in the project directory,
-    /// not whatever cwd the last pane drifted to. A new tab in the PINNED
-    /// workspace (no project directory) starts at home; it's pinned from
-    /// birth — `saveWorkspaces` gives it a record.
+    /// Creates an interactive tab in the directory selected in Settings.
+    /// Active pane falls back to the project path when no local cwd is available.
+    /// The pinned workspace falls back to home.
     func createTab(projectID: UUID, projects: [Project]) {
+        let projectDirectory: String
         if projectID == PinnedTabs.projectID {
-            createTab(projectID: projectID, projectPath: PinnedTabs.fallbackRoot)
-            return
+            projectDirectory = PinnedTabs.fallbackRoot
+        } else {
+            guard let project = projects.first(where: { $0.id == projectID }) else { return }
+            projectDirectory = project.path
         }
-        guard let project = projects.first(where: { $0.id == projectID }) else { return }
-        createTab(projectID: projectID, projectPath: project.path)
+        let activePaneDirectory = focusedPane(for: projectID)?.liveLocalWorkingDirectory()
+        let newTabDirectory = Preferences.shared.newTabWorkingDirectory.resolveNewTabDirectory(
+            projectDirectory: projectDirectory,
+            activePaneDirectory: activePaneDirectory
+        )
+        createTab(projectID: projectID, projectPath: newTabDirectory)
     }
 
     /// The teardown half of `closeTab`, without the workspace save — so a

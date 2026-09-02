@@ -2,6 +2,30 @@ import AppKit
 import Foundation
 import Observation
 
+/// Determines whether a new tab starts in the project directory or the focused pane's cwd.
+enum NewTabWorkingDirectory: String, CaseIterable, Identifiable {
+    case projectDirectory = "project"
+    case activePaneDirectory = "active_pane"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .projectDirectory: "Project"
+        case .activePaneDirectory: "Active pane"
+        }
+    }
+
+    /// Uses the active pane cwd when selected and nonempty. Otherwise, uses the project directory.
+    func resolveNewTabDirectory(projectDirectory: String, activePaneDirectory: String?) -> String {
+        guard self == .activePaneDirectory,
+              let activePaneDirectory,
+              !activePaneDirectory.isEmpty
+        else { return projectDirectory }
+        return activePaneDirectory
+    }
+}
+
 /// When the numbered tab switcher in the title bar is shown.
 enum TabSwitcherVisibility: String, CaseIterable, Identifiable {
     case always
@@ -212,6 +236,11 @@ final class Preferences {
     /// Multiplier applied to terminal scroll wheel / trackpad row deltas.
     var terminalScrollSpeed: Double {
         didSet { defaults.set(terminalScrollSpeed, forKey: Keys.terminalScrollSpeed) }
+    }
+
+    /// Selection shown by "New tab directory" in Settings.
+    var newTabWorkingDirectory: NewTabWorkingDirectory {
+        didSet { defaults.set(newTabWorkingDirectory.rawValue, forKey: Keys.newTabWorkingDirectory) }
     }
 
     /// Presentation used by `peekSidebarWhenHidden`. The pinned sidebar is
@@ -690,6 +719,8 @@ final class Preferences {
         self.defaults = defaults
         autoTilingEnabled = defaults.bool(forKey: Keys.autoTiling)
         terminalScrollSpeed = Self.clampScrollSpeed(defaults.double(forKey: Keys.terminalScrollSpeed), fallback: 1.0)
+        newTabWorkingDirectory = (defaults.string(forKey: Keys.newTabWorkingDirectory))
+            .flatMap(NewTabWorkingDirectory.init(rawValue:)) ?? .projectDirectory
         sidebarPeekStyle = (defaults.string(forKey: Keys.sidebarPeekStyle))
             .flatMap(SidebarPeekStyle.init(rawValue:)) ?? .resizeTerminal
         windowOpacity = (defaults.object(forKey: Keys.windowOpacity) as? Double) ?? 1.0
@@ -835,6 +866,7 @@ final class Preferences {
     enum Keys {
         static let autoTiling = "macterm.autoTiling.enabled"
         static let terminalScrollSpeed = "macterm.terminal.scrollSpeed"
+        static let newTabWorkingDirectory = "macterm.tabs.newTabWorkingDirectory"
         static let sidebarPeekStyle = "macterm.sidebar.presentation"
         static let windowOpacity = "macterm.window.opacity"
         static let windowBlurRadius = "macterm.window.blurRadius"

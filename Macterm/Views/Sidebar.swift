@@ -727,7 +727,7 @@ struct SidebarContent: View {
     private func projectMenu(_ project: Project) -> some View {
         Button("New Tab") {
             appState.selectProject(project)
-            appState.createTab(projectID: project.id, projectPath: project.path)
+            appState.createTab(projectID: project.id, projects: projectStore.projects)
             presentation.expandedProjects.insert(project.id)
         }
         Button("Copy Path") {
