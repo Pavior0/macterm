@@ -55,6 +55,15 @@ final class TerminalTab: Identifiable {
         return sidebarTitle
     }
 
+    /// Returns the one-line sidebar title using project-relative pane titles.
+    func sidebarRowTitle(projectDirectory: String?) -> String {
+        if let customTitle { return customTitle }
+        let panes = splitRoot.allPanes()
+        if panes.count >= 4 { return "\(panes.count) panes" }
+        if let pane = panes.first { return pane.sidebarSegmentTitle(projectDirectory: projectDirectory) }
+        return "Terminal"
+    }
+
     /// The AI-agent logo for this tab's sidebar row: the focused pane's
     /// running agent, else the first pane running one. nil when no pane has
     /// an agent in the foreground (the user's chosen tab icon shows instead).

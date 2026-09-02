@@ -184,6 +184,9 @@ final class GhosttyTerminalNSView: NSView {
         }
     }
 
+    /// Fires when OSC 7 reports a new working directory.
+    var onWorkingDirectoryChange: ((String) -> Void)?
+
     /// Deliver a title reported by libghostty (OSC 0/2 / `SET_TITLE`).
     /// Called by `GhosttyCallbacks`.
     func surfaceDidReportTitle(_ title: String) {

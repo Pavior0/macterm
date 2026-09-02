@@ -268,6 +268,46 @@ struct PaneTitleTests {
         #expect(tab.autoTitle == "✳ session")
     }
 
+    // MARK: - Sidebar working directory titles
+
+    @Test
+    func sidebar_title_keeps_the_process_at_the_project_root() throws {
+        let pane = Pane(projectPath: "/code/commerce", projectID: UUID())
+        let shell = try loginShellName()
+        pane.applyForegroundRefresh(name: shell, foregroundPID: 10)
+
+        #expect(pane.sidebarSegmentTitle(projectDirectory: "/code/commerce") == shell)
+    }
+
+    @Test
+    func sidebar_title_uses_the_relative_directory_for_an_idle_shell() throws {
+        let pane = Pane(projectPath: "/code/commerce", projectID: UUID())
+        try pane.applyForegroundRefresh(name: loginShellName(), foregroundPID: 10)
+        pane.receiveReportedWorkingDirectory("/code/commerce/apps/web")
+
+        #expect(pane.sidebarSegmentTitle(projectDirectory: "/code/commerce") == "apps/web")
+    }
+
+    @Test
+    func sidebar_title_keeps_the_directory_when_a_program_runs() {
+        let pane = Pane(projectPath: "/code/commerce/apps/web", projectID: UUID())
+        pane.applyForegroundRefresh(name: "node", foregroundPID: 20)
+
+        #expect(pane.sidebarSegmentTitle(projectDirectory: "/code/commerce") == "apps/web · node")
+    }
+
+    @Test
+    func sidebar_title_compacts_deep_and_sibling_directories() {
+        #expect(SidebarTabTitle.projectRelativeDirectoryLabel(
+            workingDirectory: "/code/commerce/packages/platform/auth/src",
+            projectDirectory: "/code/commerce"
+        ) == "…/platform/auth/src")
+        #expect(SidebarTabTitle.projectRelativeDirectoryLabel(
+            workingDirectory: "/code/commerce-feature/apps/web",
+            projectDirectory: "/code/commerce"
+        ) == "../commerce-feature/apps/web")
+    }
+
     // MARK: - Auto-naming toggle
 
     @Test
@@ -288,6 +328,8 @@ struct PaneTitleTests {
         // real processes and busy-close must keep its verdicts.
         #expect(pane.foregroundProcessName == "hx")
         #expect(pane.processTitle == "hx")
+        pane.receiveReportedWorkingDirectory("/work/project/apps/web")
+        #expect(pane.sidebarSegmentTitle(projectDirectory: "/work/project") == shell)
 
         // A remote pane holds its host name instead of the probe's answer.
         let remote = makeRemotePane()
