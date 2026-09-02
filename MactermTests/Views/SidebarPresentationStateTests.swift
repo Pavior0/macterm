@@ -55,4 +55,80 @@ struct SidebarPresentationStateTests {
         #expect(state.selection == [.tab(projectID: projectID, tabID: tabID)])
         #expect(state.scrollPosition == .tab(projectID: projectID, tabID: tabID))
     }
+
+    @Test
+    func a_shift_click_range_spans_every_row_between_the_two_ends() {
+        let state = SidebarPresentationState()
+        let projectID = UUID()
+        let tabs = (0 ..< 5).map { _ in UUID() }
+        state.orderedItems = [.project(projectID)]
+            + tabs.map { .tab(projectID: projectID, tabID: $0) }
+
+        let range = state.itemRange(
+            from: .tab(projectID: projectID, tabID: tabs[0]),
+            to: .tab(projectID: projectID, tabID: tabs[3])
+        )
+
+        #expect(range == tabs[0 ... 3].map { .tab(projectID: projectID, tabID: $0) })
+    }
+
+    @Test
+    func a_shift_click_range_reads_the_same_dragged_upward() {
+        let state = SidebarPresentationState()
+        let projectID = UUID()
+        let tabs = (0 ..< 3).map { _ in UUID() }
+        state.orderedItems = tabs.map { .tab(projectID: projectID, tabID: $0) }
+
+        let up = state.itemRange(
+            from: .tab(projectID: projectID, tabID: tabs[2]),
+            to: .tab(projectID: projectID, tabID: tabs[0])
+        )
+
+        #expect(up == state.orderedItems)
+    }
+
+    @Test
+    func a_range_off_a_vanished_row_is_nil_rather_than_a_wrong_span() {
+        let state = SidebarPresentationState()
+        let projectID = UUID()
+        let tabID = UUID()
+        state.orderedItems = [.tab(projectID: projectID, tabID: tabID)]
+
+        // The anchor's tab was closed (or its project collapsed) since the
+        // click that set it — the caller selects just the clicked row.
+        #expect(state.itemRange(
+            from: .tab(projectID: projectID, tabID: UUID()),
+            to: .tab(projectID: projectID, tabID: tabID)
+        ) == nil)
+    }
+
+    /// The flag is one process-wide value (it gates a global retry loop), so
+    /// these two set it from a known state and hand it back — a sibling test
+    /// that leaves a rename open must not decide whether they pass.
+    @Test
+    func an_open_rename_holds_focus_restoration_off_until_it_ends() {
+        FocusRestoration.isEditingInlineName = false
+        defer { FocusRestoration.isEditingInlineName = false }
+        let state = SidebarPresentationState()
+        let tabID = UUID()
+
+        state.beginRename(.tab(tabID), text: "draft")
+        #expect(FocusRestoration.isEditingInlineName)
+
+        _ = state.completeRename(.tab(tabID))
+        #expect(!FocusRestoration.isEditingInlineName)
+    }
+
+    @Test
+    func cancelling_a_rename_also_releases_focus_restoration() {
+        FocusRestoration.isEditingInlineName = false
+        defer { FocusRestoration.isEditingInlineName = false }
+        let state = SidebarPresentationState()
+        let tabID = UUID()
+
+        state.beginRename(.tab(tabID), text: "draft")
+        #expect(state.cancelRename(.tab(tabID)))
+
+        #expect(!FocusRestoration.isEditingInlineName)
+    }
 }

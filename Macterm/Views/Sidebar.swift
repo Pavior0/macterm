@@ -339,7 +339,16 @@ struct SidebarContent: View {
             // puts the ink an equal ~20.5pt off both the left and bottom edges.
             .padding(.bottom, 20)
         }
+        .onChange(of: orderedItems, initial: true) { _, items in
+            presentation.orderedItems = items
+        }
         .onChange(of: presentation.selection) { _, items in
+            // Whatever collapses the sidebar to a single row becomes the row a
+            // later shift-click extends from — a native click on a row's icon
+            // or padding, a title click, or `syncSelection` after a tab switch.
+            // Watching the selection rather than writing the anchor at each
+            // click site is what keeps ours and AppKit's the same row.
+            if items.count == 1 { presentation.selectionAnchor = items.first }
             // Navigation follows a single selection only. A multi-selection is
             // for bulk actions (delete), so it must not yank the active project
             // or tab around as rows are added to the selection.
@@ -397,6 +406,7 @@ struct SidebarContent: View {
                     tab: tab,
                     index: index + 1,
                     iconSymbolOverride: "pin",
+                    selectionItem: .tab(projectID: PinnedTabs.projectID, tabID: record.id),
                     presentation: presentation,
                     isInteractive: isInteractive,
                     onRename: { newName in
@@ -494,6 +504,7 @@ struct SidebarContent: View {
         SidebarTabRow(
             tab: tab,
             index: tabIndex + 1,
+            selectionItem: .tab(projectID: project.id, tabID: tab.id),
             presentation: presentation,
             isInteractive: isInteractive,
             // An unloaded project keeps its tabs as a layout with no shells
@@ -573,6 +584,25 @@ struct SidebarContent: View {
             // drop stays on target.
             if targeted { presentation.expandedProjects.insert(project.id) }
         }
+    }
+
+    /// Every visible row in visual order, mirroring the `List` body: the
+    /// pinned records, then each project's header followed by its tabs while
+    /// that project is expanded. Published to `presentation` so a shift-click
+    /// on a row title can resolve the range between two rows — the List keeps
+    /// its own copy of this order for the clicks it still handles itself.
+    private var orderedItems: [SidebarItem] {
+        var items: [SidebarItem] = appState.pinnedRecords.map {
+            .tab(projectID: PinnedTabs.projectID, tabID: $0.id)
+        }
+        for project in projectStore.projects {
+            items.append(.project(project.id))
+            guard presentation.expandedProjects.contains(project.id) else { continue }
+            items.append(contentsOf: (appState.workspaces[project.id]?.tabs ?? []).map {
+                .tab(projectID: project.id, tabID: $0.id)
+            })
+        }
+        return items
     }
 
     private var activeTabID: UUID? {
@@ -985,6 +1015,7 @@ private struct SidebarTabRow: View {
     /// Fixed icon overriding the user's `tabIconSymbol` preference — the
     /// pinned rows pass "pin" so the icon itself marks the row's kind.
     var iconSymbolOverride: String?
+    let selectionItem: SidebarItem
     @Bindable
     var presentation: SidebarPresentationState
     let isInteractive: Bool
@@ -1019,6 +1050,12 @@ private struct SidebarTabRow: View {
                 .onAppear { focused = true }
         } else {
             TabRowTitle(tab: tab)
+                // A title-level double-click gesture owns the tap sequence,
+                // so the List row never sees clicks landing on the text. Give
+                // the title the same selection path explicitly, while keeping
+                // rename simultaneous so the first click selects immediately.
+                .onTapGesture { select() }
+                .simultaneousGesture(TapGesture(count: 2).onEnded { beginRename() })
         }
     }
 
@@ -1096,6 +1133,41 @@ private struct SidebarTabRow: View {
             originalCustomTitle: tab.customTitle
         )
         appState.renamingTabID = nil
+    }
+
+    /// Stand in for the List's own click handling, which never sees a press
+    /// that lands on the title (see `titleContent`).
+    ///
+    /// Shift has to extend the range between the anchor and this row, not just
+    /// add this row: the selection drives the bulk "Close N Tabs" / "Remove N
+    /// Projects" actions, so inserting one row means clicking 1 and
+    /// shift-clicking 5 closes 2 tabs instead of 5.
+    private func select() {
+        guard isInteractive else { return }
+        // The event being handled, not the keyboard's state whenever the
+        // gesture happens to resolve — a Command released with the mouse
+        // button would otherwise read as a plain click and collapse an
+        // in-progress multi-selection down to this one row.
+        let current = NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+        let modifiers = current.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.command) {
+            if presentation.selection.contains(selectionItem) {
+                presentation.selection.remove(selectionItem)
+            } else {
+                presentation.selection.insert(selectionItem)
+            }
+        } else if modifiers.contains(.shift),
+                  let anchor = presentation.selectionAnchor,
+                  anchor != selectionItem,
+                  let range = presentation.itemRange(from: anchor, to: selectionItem)
+        {
+            presentation.selection = Set(range)
+        } else {
+            // Includes a shift-click with no usable anchor (nothing selected
+            // yet, or the anchor's row has since gone): AppKit selects just the
+            // clicked row there too.
+            presentation.selection = [selectionItem]
+        }
     }
 
     private func commit() {
