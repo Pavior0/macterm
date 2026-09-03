@@ -2,6 +2,37 @@ import AppKit
 import Foundation
 import Observation
 
+/// Determines whether a new terminal starts in the project directory or the focused pane's cwd.
+enum NewTerminalWorkingDirectory: String, CaseIterable, Identifiable {
+    case projectDirectory = "project"
+    case activePaneDirectory = "active_pane"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .projectDirectory: "Project"
+        case .activePaneDirectory: "Active pane"
+        }
+    }
+
+    /// The directory a new terminal must start in, or nil for "keep the
+    /// caller's own inheritance". Nil is only ever "Active pane" with no
+    /// usable LOCAL cwd — every remote pane, and any pane whose surface
+    /// isn't up yet — and coercing that case to the project root would be
+    /// wrong: `TerminalTab.split` inherits a remote pane's scp-style
+    /// `projectPath` verbatim, so overriding it spawns a LOCAL shell at the
+    /// project root instead of a remote sibling (and a pinned pane, whose
+    /// own `projectPath` IS its cwd, would land at home). Callers with
+    /// nothing to inherit from (a brand-new tab) coalesce to the project
+    /// directory themselves.
+    func resolveNewTerminalDirectory(projectDirectory: String, activePaneDirectory: String?) -> String? {
+        guard self == .activePaneDirectory else { return projectDirectory }
+        guard let activePaneDirectory, !activePaneDirectory.isEmpty else { return nil }
+        return activePaneDirectory
+    }
+}
+
 /// When the numbered tab switcher in the title bar is shown.
 enum TabSwitcherVisibility: String, CaseIterable, Identifiable {
     case always
@@ -212,6 +243,16 @@ final class Preferences {
     /// Multiplier applied to terminal scroll wheel / trackpad row deltas.
     var terminalScrollSpeed: Double {
         didSet { defaults.set(terminalScrollSpeed, forKey: Keys.terminalScrollSpeed) }
+    }
+
+    /// Selection shown by "New tab directory" in Settings.
+    var newTabWorkingDirectory: NewTerminalWorkingDirectory {
+        didSet { defaults.set(newTabWorkingDirectory.rawValue, forKey: Keys.newTabWorkingDirectory) }
+    }
+
+    /// Selection shown by "New split directory" in Settings.
+    var newSplitWorkingDirectory: NewTerminalWorkingDirectory {
+        didSet { defaults.set(newSplitWorkingDirectory.rawValue, forKey: Keys.newSplitWorkingDirectory) }
     }
 
     /// Presentation used by `peekSidebarWhenHidden`. The pinned sidebar is
@@ -690,6 +731,12 @@ final class Preferences {
         self.defaults = defaults
         autoTilingEnabled = defaults.bool(forKey: Keys.autoTiling)
         terminalScrollSpeed = Self.clampScrollSpeed(defaults.double(forKey: Keys.terminalScrollSpeed), fallback: 1.0)
+        // Defaults preserve the behavior from before these preferences existed:
+        // new tabs started at the project root; splits inherited the active pane cwd.
+        newTabWorkingDirectory = (defaults.string(forKey: Keys.newTabWorkingDirectory))
+            .flatMap(NewTerminalWorkingDirectory.init(rawValue:)) ?? .projectDirectory
+        newSplitWorkingDirectory = (defaults.string(forKey: Keys.newSplitWorkingDirectory))
+            .flatMap(NewTerminalWorkingDirectory.init(rawValue:)) ?? .activePaneDirectory
         sidebarPeekStyle = (defaults.string(forKey: Keys.sidebarPeekStyle))
             .flatMap(SidebarPeekStyle.init(rawValue:)) ?? .resizeTerminal
         windowOpacity = (defaults.object(forKey: Keys.windowOpacity) as? Double) ?? 1.0
@@ -835,6 +882,8 @@ final class Preferences {
     enum Keys {
         static let autoTiling = "macterm.autoTiling.enabled"
         static let terminalScrollSpeed = "macterm.terminal.scrollSpeed"
+        static let newTabWorkingDirectory = "macterm.tabs.newTabWorkingDirectory"
+        static let newSplitWorkingDirectory = "macterm.panes.newSplitWorkingDirectory"
         static let sidebarPeekStyle = "macterm.sidebar.presentation"
         static let windowOpacity = "macterm.window.opacity"
         static let windowBlurRadius = "macterm.window.blurRadius"

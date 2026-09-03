@@ -986,9 +986,8 @@ final class AppState {
     /// and wants new tabs / persisted state to start there.
     ///
     /// No-op when there's no active project or no resolvable pwd. We don't
-    /// touch open panes or workspaces — those keep their current cwd; only
-    /// future tabs created via `createTab(projectID:projects:)` (which reads
-    /// `project.path`) will land in the new directory.
+    /// touch open panes or workspaces. They keep their current cwd. Future tabs
+    /// use the new directory when "New tab directory" is set to Project.
     func replaceProjectPathWithCurrentDir(projectStore: ProjectStore) {
         guard let projectID = activeProjectID,
               let project = projectStore.projects.first(where: { $0.id == projectID }),
@@ -1201,26 +1200,48 @@ final class AppState {
     /// `run:` semantics). Returns the new tab's ID, nil when the project has
     /// no live workspace.
     @discardableResult
-    func createTab(projectID: UUID, projectPath: String, command: String? = nil) -> UUID? {
+    func createTab(
+        projectID: UUID,
+        projectPath: String,
+        sessionSlug: String? = nil,
+        command: String? = nil
+    ) -> UUID? {
         guard let ws = workspaces[projectID] else { return nil }
-        let tab = ws.createTab(projectPath: projectPath, command: command)
+        let tab = ws.createTab(projectPath: projectPath, sessionSlug: sessionSlug, command: command)
         logger.debug("createTab: project=\(projectID, privacy: .public) tabs=\(ws.tabs.count, privacy: .public)")
         saveWorkspaces()
         return tab.id
     }
 
-    /// Convenience overload: look up the project's canonical path from the
-    /// given projects list so new tabs always land in the project directory,
-    /// not whatever cwd the last pane drifted to. A new tab in the PINNED
-    /// workspace (no project directory) starts at home; it's pinned from
-    /// birth — `saveWorkspaces` gives it a record.
-    func createTab(projectID: UUID, projects: [Project]) {
-        if projectID == PinnedTabs.projectID {
-            createTab(projectID: projectID, projectPath: PinnedTabs.fallbackRoot)
-            return
+    /// Creates a tab in the directory selected in Settings.
+    /// Active pane falls back to the project path when no local cwd is available.
+    /// The pinned workspace falls back to home.
+    @discardableResult
+    func createTab(projectID: UUID, projects: [Project], command: String? = nil) -> UUID? {
+        guard let projectDirectory = configuredProjectDirectory(projectID: projectID, projects: projects) else {
+            return nil
         }
-        guard let project = projects.first(where: { $0.id == projectID }) else { return }
-        createTab(projectID: projectID, projectPath: project.path)
+        let activePaneDirectory = focusedPane(for: projectID)?.liveLocalWorkingDirectory()
+        // A brand-new tab has no source pane to inherit from, so an
+        // unusable active-pane cwd (nil) lands in the project directory.
+        let newTabDirectory = Preferences.shared.newTabWorkingDirectory.resolveNewTerminalDirectory(
+            projectDirectory: projectDirectory,
+            activePaneDirectory: activePaneDirectory
+        ) ?? projectDirectory
+        // The cwd is user-selectable, but zmx session grouping remains project-scoped.
+        let projectSessionSlug = (projectDirectory as NSString).lastPathComponent
+        return createTab(
+            projectID: projectID,
+            projectPath: newTabDirectory,
+            sessionSlug: projectSessionSlug,
+            command: command
+        )
+    }
+
+    /// Returns the configured project root, including the synthetic pinned workspace fallback.
+    private func configuredProjectDirectory(projectID: UUID, projects: [Project]) -> String? {
+        if projectID == PinnedTabs.projectID { return PinnedTabs.fallbackRoot }
+        return projects.first(where: { $0.id == projectID })?.path
     }
 
     /// The teardown half of `closeTab`, without the workspace save — so a
@@ -1636,13 +1657,48 @@ final class AppState {
 
     // MARK: - Splits
 
-    func splitPane(direction: SplitDirection, projectID: UUID) {
+    /// Splits the focused pane using the user's new split directory preference.
+    func splitPane(direction: SplitDirection, projectID: UUID, projects: [Project]) {
         guard let tab = workspaces[projectID]?.activeTab,
-              let paneID = tab.focusedPaneID
+              let paneID = tab.focusedPaneID,
+              let projectDirectory = configuredProjectDirectory(projectID: projectID, projects: projects)
         else { return }
+        splitPane(
+            paneID,
+            direction: direction,
+            projectID: projectID,
+            projectDirectory: projectDirectory
+        )
+    }
+
+    /// Splits a specific pane using the user's new split directory preference.
+    @discardableResult
+    func splitPane(
+        _ paneID: UUID,
+        direction: SplitDirection,
+        projectID: UUID,
+        projectDirectory: String,
+        command: String? = nil
+    ) -> UUID? {
+        guard let ws = workspaces[projectID],
+              let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil }),
+              let pane = tab.splitRoot.findPane(id: paneID)
+        else { return nil }
+        // nil = inherit (the source pane's live cwd, else its own
+        // `projectPath`) — never coerced to the project root, which would
+        // turn a remote pane's split into a local shell.
+        let newPaneDirectory = Preferences.shared.newSplitWorkingDirectory.resolveNewTerminalDirectory(
+            projectDirectory: projectDirectory,
+            activePaneDirectory: pane.liveLocalWorkingDirectory()
+        )
         logger.debug("splitPane: \(String(describing: direction), privacy: .public) pane=\(paneID, privacy: .public)")
-        tab.split(paneID: paneID, direction: direction)
-        saveWorkspaces()
+        return splitPane(
+            paneID,
+            direction: direction,
+            projectID: projectID,
+            command: command,
+            newPaneWorkingDirectory: newPaneDirectory
+        )
     }
 
     /// Split a SPECIFIC pane — found in whichever of the project's tabs holds
@@ -1654,42 +1710,68 @@ final class AppState {
         _ paneID: UUID,
         direction: SplitDirection,
         projectID: UUID,
-        command: String? = nil
+        command: String? = nil,
+        newPaneWorkingDirectory: String? = nil
     ) -> UUID? {
         guard let ws = workspaces[projectID],
               let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil })
         else { return nil }
-        let newID = tab.split(paneID: paneID, direction: direction, command: command)
+        let newID = tab.split(
+            paneID: paneID,
+            direction: direction,
+            command: command,
+            newPaneWorkingDirectory: newPaneWorkingDirectory
+        )
         saveWorkspaces()
         return newID
     }
 
     /// Split a pane into an equal `rows`×`columns` grid (see
-    /// `TerminalTab.makeGrid`), spawning `command` in each new pane. Returns
-    /// the new pane IDs.
+    /// `TerminalTab.makeGrid`), spawning `command` in each new pane. Every
+    /// cell honors the new split directory preference, so a grid and a
+    /// `Cmd+D` split off the same pane can't disagree about it. Returns the
+    /// new pane IDs.
     @discardableResult
     func makeGrid(
         _ paneID: UUID,
         rows: Int,
         columns: Int,
         projectID: UUID,
+        projectDirectory: String,
         command: String? = nil
     ) -> [UUID] {
         guard let ws = workspaces[projectID],
-              let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil })
+              let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil }),
+              let pane = tab.splitRoot.findPane(id: paneID)
         else { return [] }
-        let created = tab.makeGrid(paneID: paneID, rows: rows, columns: columns, command: command)
+        let newPaneDirectory = Preferences.shared.newSplitWorkingDirectory.resolveNewTerminalDirectory(
+            projectDirectory: projectDirectory,
+            activePaneDirectory: pane.liveLocalWorkingDirectory()
+        )
+        let created = tab.makeGrid(
+            paneID: paneID,
+            rows: rows,
+            columns: columns,
+            command: command,
+            newPaneWorkingDirectory: newPaneDirectory
+        )
         if !created.isEmpty { saveWorkspaces() }
         return created
     }
 
     /// Split the focused pane along its longer on-screen axis (Ghostty's
     /// `new_split` / BSP behavior). Direction is decided by `TerminalTab.autoSplit`.
-    func autoSplitPane(projectID: UUID) {
+    func autoSplitPane(projectID: UUID, projects: [Project]) {
         guard let tab = workspaces[projectID]?.activeTab,
-              let paneID = tab.focusedPaneID
+              let paneID = tab.focusedPaneID,
+              let pane = tab.focusedPane,
+              let projectDirectory = configuredProjectDirectory(projectID: projectID, projects: projects)
         else { return }
-        tab.autoSplit(paneID: paneID)
+        let newPaneDirectory = Preferences.shared.newSplitWorkingDirectory.resolveNewTerminalDirectory(
+            projectDirectory: projectDirectory,
+            activePaneDirectory: pane.liveLocalWorkingDirectory()
+        )
+        tab.autoSplit(paneID: paneID, newPaneWorkingDirectory: newPaneDirectory)
         saveWorkspaces()
     }
 

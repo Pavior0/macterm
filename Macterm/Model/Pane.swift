@@ -145,6 +145,12 @@ final class Pane: Identifiable {
         surfaceReattachTick &+= 1
     }
 
+    /// Returns a local pane's cwd. Remote cwd values omit the host, so remote panes return nil.
+    func liveLocalWorkingDirectory() -> String? {
+        guard !isRemote else { return nil }
+        return nsView?.currentPwd ?? ProcessInspector.foregroundWorkingDirectory(forPane: self)
+    }
+
     var executionState: TerminalExecutionState = .idle {
         didSet {
             guard executionState != oldValue else { return }
