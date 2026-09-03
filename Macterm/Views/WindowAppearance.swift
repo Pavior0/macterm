@@ -464,9 +464,19 @@ enum WindowAppearance {
         syncToolbar(window: window)
 
         disableSidebarEdgeHoverReveal(window: window)
+        collapseSidebarForHorizontalTabs(window: window)
         restoreSidebarWidth(window: window)
         enforceSidebarWidthLimit(window: window)
         _ = disableProactivePeekOnce
+    }
+
+    /// Keeps the native sidebar mutually exclusive with the horizontal tab bar.
+    private static func collapseSidebarForHorizontalTabs(window: NSWindow) {
+        guard Preferences.shared.workspaceTabLayout == .horizontal,
+              let sidebar = window.contentView?.firstSplitView?
+              .owningSplitViewController?.splitViewItems.first
+        else { return }
+        sidebar.isCollapsed = true
     }
 
     /// Reopen the sidebar at the width the user last dragged it to.
@@ -501,7 +511,8 @@ enum WindowAppearance {
     }
 
     private static func restoreSidebarWidth(window: NSWindow) {
-        guard !didRestoreSidebarWidth,
+        guard Preferences.shared.workspaceTabLayout == .vertical,
+              !didRestoreSidebarWidth,
               let split = window.contentView?.firstSplitView,
               split.arrangedSubviews.count > 1,
               let sidebar = split.owningSplitViewController?.splitViewItems.first

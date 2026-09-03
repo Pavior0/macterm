@@ -10,7 +10,9 @@ struct MainWindow: View {
     @Environment(ProjectStore.self)
     private var projectStore
     @State
-    private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    private var columnVisibility: NavigationSplitViewVisibility = Preferences.shared.workspaceTabLayout == .horizontal
+        ? .detailOnly
+        : .automatic
     @State
     private var detailWidth: CGFloat = .infinity
     @State
