@@ -1,10 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// AppKit top-aligns `.left` title-bar accessory content inside the taller unified header.
-/// The standard traffic-light center sits nine points below that accessory content center.
-private let horizontalTabBarTrafficLightAlignmentOffset: CGFloat = 9
-
 /// Superlogical-style title-bar navigation for one project's horizontally scrolling tabs.
 struct HorizontalTabBar: View {
     @Environment(AppState.self)
@@ -117,10 +113,13 @@ struct HorizontalTabBarAccessory: NSViewRepresentable {
         let rootView = AnyView(
             HorizontalTabBar()
                 .frame(width: requestedWidth)
-                // Accept AppKit's full-height proposal, then compensate for its
-                // upper-edge alignment inside the unified title-bar material.
+                // The old implementation added a fixed +9pt offset to
+                // compensate for macOS 26's NSTitlebarAccessoryClipView
+                // placing a `.left` accessory above the traffic-light center.
+                // macOS 27 uses NSTitlebarAccessoryContainerView instead, so
+                // that compensation over-shoots. Centering a 32pt row in the
+                // measured title-bar host works on both systems.
                 .frame(maxHeight: .infinity, alignment: .center)
-                .offset(y: horizontalTabBarTrafficLightAlignmentOffset)
                 .environment(appState)
                 .environment(projectStore)
         )
@@ -227,10 +226,25 @@ struct HorizontalTabBarAccessory: NSViewRepresentable {
             let measuredWindowWidth = availableWidth.isFinite
                 ? max(window.frame.width, availableWidth)
                 : window.frame.width
-            let accessorySize = NSSize(width: max(280, measuredWindowWidth - 92), height: 32)
+            let titlebarHeight = measuredTitlebarHeight(for: window)
+            let accessorySize = NSSize(
+                width: max(280, measuredWindowWidth - 92),
+                height: titlebarHeight
+            )
             hostingView.frame = NSRect(origin: .zero, size: accessorySize)
             hostingView.autoresizingMask = [.height]
             accessoryController.preferredContentSize = accessorySize
+        }
+
+        /// The unified title bar is not a stable constant on macOS. The
+        /// content view's safe-area inset tracks the current AppKit title-bar
+        /// height (52pt on macOS 27), while the content-layout delta provides a
+        /// fallback during the short period before safe-area propagation.
+        private func measuredTitlebarHeight(for window: NSWindow) -> CGFloat {
+            let safeAreaHeight = window.contentView?.safeAreaInsets.top ?? 0
+            let layoutDelta = window.frame.height - window.contentLayoutRect.height
+            let measuredHeight = max(safeAreaHeight, layoutDelta)
+            return measuredHeight.isFinite ? max(32, measuredHeight) : 32
         }
 
         func removeAccessory() {

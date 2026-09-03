@@ -822,6 +822,43 @@ private struct HorizontalTerminalContainerModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         if isPresented {
+            terminalContainer(content)
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private func terminalContainer(_ content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            // macOS 26 introduced ConcentricRectangle, which resolves each
+            // corner from the actual window shape. This matters here because
+            // the terminal's top edge sits well below the window's top edge:
+            // its upper corners should not be forced to use the bottom radius.
+            let windowShape = RoundedRectangle(
+                cornerRadius: windowCornerRadius ?? 0,
+                style: .continuous
+            )
+            let terminalShape = ConcentricRectangle(
+                topLeadingCorner: .concentric(minimum: .fixed(4)),
+                topTrailingCorner: .concentric(minimum: .fixed(4)),
+                bottomLeadingCorner: .concentric(minimum: .fixed(4)),
+                bottomTrailingCorner: .concentric(minimum: .fixed(4))
+            )
+            content
+                .containerShape(windowShape)
+                .padding(Self.terminalContentInset)
+                .background(MactermTheme.terminalBg)
+                .clipShape(terminalShape)
+                .overlay {
+                    terminalShape
+                        .stroke(MactermTheme.border, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .padding(.horizontal, Self.windowEdgeInset)
+                .padding(.top, Self.topBarMargin)
+                .padding(.bottom, Self.windowEdgeInset)
+        } else {
             let containerShape = RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous)
             content
                 .padding(Self.terminalContentInset)
@@ -835,8 +872,6 @@ private struct HorizontalTerminalContainerModifier: ViewModifier {
                 .padding(.horizontal, Self.windowEdgeInset)
                 .padding(.top, Self.topBarMargin)
                 .padding(.bottom, Self.windowEdgeInset)
-        } else {
-            content
         }
     }
 }
