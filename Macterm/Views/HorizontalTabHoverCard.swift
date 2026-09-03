@@ -3,6 +3,9 @@ import SwiftUI
 
 /// Delayed hover preview with information that the compact tab row cannot fit.
 struct HorizontalTabHoverCard: View {
+    private static let metadataOpacity = 0.72
+    private static let quietMetadataOpacity = 0.58
+
     let tab: TerminalTab
     let projectDirectory: String?
     @State
@@ -21,7 +24,7 @@ struct HorizontalTabHoverCard: View {
                     HorizontalAgentIconMark(agent: agent, size: 16)
                 } else {
                     Image(systemName: "terminal")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary.opacity(Self.metadataOpacity))
                 }
 
                 Text(tab.sidebarTitle)
@@ -52,7 +55,7 @@ struct HorizontalTabHoverCard: View {
                         HStack(spacing: 7) {
                             Text("\(index + 1)")
                                 .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.primary.opacity(Self.quietMetadataOpacity))
                                 .frame(width: 12, alignment: .trailing)
                             if let agent = pane.agentIcon {
                                 HorizontalAgentIconMark(agent: agent, size: 11)
@@ -63,7 +66,7 @@ struct HorizontalTabHoverCard: View {
                             if pane.id == tab.focusedPaneID {
                                 Text("Focused")
                                     .font(.caption2)
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(.primary.opacity(Self.quietMetadataOpacity))
                             }
                         }
                         .font(.caption)
@@ -71,7 +74,7 @@ struct HorizontalTabHoverCard: View {
                     if panes.count > 4 {
                         Text("+\(panes.count - 4) more panes")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.primary.opacity(Self.metadataOpacity))
                     }
                 }
             }
@@ -100,12 +103,12 @@ struct HorizontalTabHoverCard: View {
         switch branchState {
         case .loading:
             metadataRow(icon: "arrow.triangle.branch", text: "Checking branch…")
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.primary.opacity(Self.quietMetadataOpacity))
         case let .available(branch):
             metadataRow(icon: "arrow.triangle.branch", text: branch)
         case .unavailable:
             metadataRow(icon: "arrow.triangle.branch", text: "No Git branch")
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.primary.opacity(Self.quietMetadataOpacity))
         }
     }
 
@@ -114,7 +117,7 @@ struct HorizontalTabHoverCard: View {
         switch tab.executionState {
         case .idle:
             Text("Idle")
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.primary.opacity(Self.quietMetadataOpacity))
         case .running:
             Label("Running", systemImage: "circle.fill")
                 .foregroundStyle(MactermTheme.warning)
@@ -134,7 +137,10 @@ struct HorizontalTabHoverCard: View {
                 .frame(width: 14)
         }
         .font(.caption)
-        .foregroundStyle(.secondary)
+        // Primary is the system's vibrant text color and adapts to the
+        // window's appearance; a moderate opacity preserves hierarchy while
+        // keeping metadata readable over Liquid Glass's changing backdrop.
+        .foregroundStyle(.primary.opacity(Self.metadataOpacity))
     }
 }
 

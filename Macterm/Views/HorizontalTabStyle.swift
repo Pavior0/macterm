@@ -41,7 +41,10 @@ extension View {
     func horizontalActiveTabMaterial(isActive: Bool) -> some View {
         if isActive {
             if #available(macOS 26.0, *) {
-                glassEffect(.clear, in: .capsule)
+                // Tab labels carry text, so use regular glass rather than the
+                // highly translucent clear variant. Regular glass adapts the
+                // backdrop's luminosity to preserve legibility.
+                glassEffect(.regular, in: .capsule)
             } else {
                 background(.regularMaterial, in: Capsule(style: .continuous))
                 overlay {

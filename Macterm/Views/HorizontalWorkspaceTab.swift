@@ -67,7 +67,7 @@ struct HorizontalWorkspaceTab: View {
             .background {
                 if !isActive, isHovering {
                     Capsule(style: .continuous)
-                        .fill(MactermTheme.hover)
+                        .fill(Color.primary.opacity(0.10))
                 }
             }
             .horizontalActiveTabMaterial(isActive: isActive)

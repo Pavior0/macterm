@@ -809,6 +809,11 @@ private struct HorizontalTerminalContainerModifier: ViewModifier {
     /// follows the tabs instead of receiving a second full margin.
     private static let topBarMargin: CGFloat = -4
     private static let terminalContentInset: CGFloat = 8
+    /// ConcentricRectangle normally derives the radius from the window's
+    /// container shape. Keep a modest floor for the brief cases where AppKit
+    /// has not exposed that shape yet (for example, while a window is first
+    /// attaching); 4pt made the terminal corners look nearly square.
+    private static let terminalMinimumCornerRadius: CGFloat = 8
 
     let isPresented: Bool
     let windowCornerRadius: CGFloat?
@@ -835,18 +840,13 @@ private struct HorizontalTerminalContainerModifier: ViewModifier {
             // corner from the actual window shape. This matters here because
             // the terminal's top edge sits well below the window's top edge:
             // its upper corners should not be forced to use the bottom radius.
-            let windowShape = RoundedRectangle(
-                cornerRadius: windowCornerRadius ?? 0,
-                style: .continuous
-            )
             let terminalShape = ConcentricRectangle(
-                topLeadingCorner: .concentric(minimum: .fixed(4)),
-                topTrailingCorner: .concentric(minimum: .fixed(4)),
-                bottomLeadingCorner: .concentric(minimum: .fixed(4)),
-                bottomTrailingCorner: .concentric(minimum: .fixed(4))
+                topLeadingCorner: .concentric(minimum: .fixed(Self.terminalMinimumCornerRadius)),
+                topTrailingCorner: .concentric(minimum: .fixed(Self.terminalMinimumCornerRadius)),
+                bottomLeadingCorner: .concentric(minimum: .fixed(Self.terminalMinimumCornerRadius)),
+                bottomTrailingCorner: .concentric(minimum: .fixed(Self.terminalMinimumCornerRadius))
             )
-            content
-                .containerShape(windowShape)
+            terminalContentWithContainerShape(content)
                 .padding(Self.terminalContentInset)
                 .background(MactermTheme.terminalBg)
                 .clipShape(terminalShape)
@@ -872,6 +872,18 @@ private struct HorizontalTerminalContainerModifier: ViewModifier {
                 .padding(.horizontal, Self.windowEdgeInset)
                 .padding(.top, Self.topBarMargin)
                 .padding(.bottom, Self.windowEdgeInset)
+        }
+    }
+
+    /// Preserve SwiftUI's system-provided container shape when AppKit doesn't
+    /// expose a positive private window radius. Supplying a zero-radius
+    /// RoundedRectangle here would override that adaptive shape with a square.
+    @ViewBuilder
+    private func terminalContentWithContainerShape(_ content: Content) -> some View {
+        if let windowCornerRadius, windowCornerRadius > 0 {
+            content.containerShape(RoundedRectangle(cornerRadius: windowCornerRadius, style: .continuous))
+        } else {
+            content
         }
     }
 }

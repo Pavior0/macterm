@@ -888,18 +888,22 @@ enum WindowAppearance {
     }
 
     /// The window's private corner radius, so the glass clips to the same
-    /// rounded corners as the window. Falls back to nil (square) if the SPI
-    /// is unavailable.
+    /// rounded corners as the window. Returns nil when AppKit reports no
+    /// positive radius so SwiftUI can keep its own system container shape.
     static func windowCornerRadius(_ window: NSWindow) -> CGFloat? {
         if window.responds(to: Selector(("_cornerRadius"))),
-           let radius = window.value(forKey: "_cornerRadius") as? CGFloat
+           let radius = window.value(forKey: "_cornerRadius") as? CGFloat,
+           radius > 0
         {
             return radius
         }
         // Older AppKit builds can expose the applied corner only on the theme
         // frame's backing layer. It is still system-owned geometry, not a
         // guessed OS-version constant.
-        return window.contentView?.superview?.layer?.cornerRadius
+        guard let radius = window.contentView?.superview?.layer?.cornerRadius,
+              radius > 0
+        else { return nil }
+        return radius
     }
 
     /// Apply the Hide Title Bar option (#226) to the window: hide the titlebar

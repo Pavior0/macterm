@@ -5,9 +5,14 @@ import SwiftUI
 /// for compact controls that can tolerate more background interference.
 extension View {
     @ViewBuilder
-    func horizontalPopoverSurface(cornerRadius: CGFloat = 12) -> some View {
+    func horizontalPopoverSurface(cornerRadius: CGFloat = 12, showsGlassEdge: Bool = true) -> some View {
         if #available(macOS 26.0, *) {
-            glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+            if showsGlassEdge {
+                glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+            } else {
+                background(.regularMaterial, in: .rect(cornerRadius: cornerRadius))
+                    .clipShape(.rect(cornerRadius: cornerRadius))
+            }
         } else {
             background(.regularMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .overlay {
