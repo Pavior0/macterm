@@ -840,7 +840,12 @@ final class ControlHandler {
         let (project, workspace) = try resolveWorkspace(args)
         let target = try resolvePane(args, in: workspace)
         let created = appState.makeGrid(
-            target.pane.id, rows: rows, columns: cols, projectID: project.id, command: args.run
+            target.pane.id,
+            rows: rows,
+            columns: cols,
+            projectID: project.id,
+            projectDirectory: project.path,
+            command: args.run
         )
         guard !created.isEmpty else {
             throw ControlError(code: .internalError, message: "grid produced no panes")
