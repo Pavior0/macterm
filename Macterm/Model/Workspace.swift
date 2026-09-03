@@ -134,8 +134,15 @@ final class TerminalTab: Identifiable {
     /// new pane in the `.second` position. Returns the new pane ID if created.
     /// A `command` spawns in the new pane via libghostty's `initial_input`
     /// (the layout `run:` path — typed into the fresh shell verbatim).
+    /// `newPaneWorkingDirectory` overrides cwd inheritance without changing
+    /// the source pane's project-scoped session slug.
     @discardableResult
-    func split(paneID: UUID, direction: SplitDirection, command: String? = nil) -> UUID? {
+    func split(
+        paneID: UUID,
+        direction: SplitDirection,
+        command: String? = nil,
+        newPaneWorkingDirectory: String? = nil
+    ) -> UUID? {
         // Bail before any side effect if the pane isn't in this tab — otherwise
         // an unknown ID would clear the user's zoom and rebalance ratios for a
         // split that never happens (mirrors toggleZoom/makeGrid's guard).
@@ -149,7 +156,7 @@ final class TerminalTab: Identifiable {
         // bogus dir instead of a remote zmx session — so skip the live cwd and
         // inherit the scp-style `projectPath` verbatim.
         let livePwd = pane.liveLocalWorkingDirectory()
-        let sourcePath = livePwd ?? pane.projectPath
+        let sourcePath = newPaneWorkingDirectory ?? livePwd ?? pane.projectPath
         let sourceProjectID = pane.projectID
         let (newRoot, newID) = splitRoot.splitting(
             paneID: paneID,
@@ -208,10 +215,14 @@ final class TerminalTab: Identifiable {
     /// splits top/bottom. Falls back to a horizontal split when the focused
     /// pane's NSView isn't attached yet and has no measurable bounds.
     @discardableResult
-    func autoSplit(paneID: UUID) -> UUID? {
+    func autoSplit(paneID: UUID, newPaneWorkingDirectory: String? = nil) -> UUID? {
         let bounds = splitRoot.findPane(id: paneID)?.nsView?.bounds.size ?? .zero
         let direction: SplitDirection = bounds.height > bounds.width ? .vertical : .horizontal
-        return split(paneID: paneID, direction: direction)
+        return split(
+            paneID: paneID,
+            direction: direction,
+            newPaneWorkingDirectory: newPaneWorkingDirectory
+        )
     }
 
     /// Adjust the nearest matching-axis split ratio around the focused pane.
@@ -388,8 +399,13 @@ final class Workspace: Identifiable {
     }
 
     @discardableResult
-    func createTab(projectPath: String, command: String? = nil) -> TerminalTab {
-        let tab = TerminalTab(projectPath: projectPath, projectID: projectID, command: command)
+    func createTab(projectPath: String, sessionSlug: String? = nil, command: String? = nil) -> TerminalTab {
+        let tab = TerminalTab(
+            projectPath: projectPath,
+            projectID: projectID,
+            sessionSlug: sessionSlug,
+            command: command
+        )
         tabs.append(tab)
         if let current = activeTabID { tabHistory.push(current) }
         activeTabID = tab.id

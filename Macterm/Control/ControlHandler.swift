@@ -420,8 +420,12 @@ final class ControlHandler {
 
     private func tabNew(_ args: ControlArgs) throws -> ControlData {
         let (project, workspace) = try resolveWorkspace(args)
-        guard let tabID = appState.createTab(projectID: project.id, projectPath: project.path, command: args.run),
-              let index = workspace.tabs.firstIndex(where: { $0.id == tabID })
+        guard let tabID = appState.createTab(
+            projectID: project.id,
+            projects: projectStore.projects,
+            command: args.run
+        ),
+            let index = workspace.tabs.firstIndex(where: { $0.id == tabID })
         else {
             throw ControlError(code: .internalError, message: "tab creation failed")
         }
@@ -547,7 +551,11 @@ final class ControlHandler {
             throw ControlError(code: .badRequest, message: "direction must be right, down, or auto")
         }
         guard let newID = appState.splitPane(
-            target.pane.id, direction: direction, projectID: project.id, command: args.run
+            target.pane.id,
+            direction: direction,
+            projectID: project.id,
+            projectDirectory: project.path,
+            command: args.run
         ), let newPane = target.tab.splitRoot.findPane(id: newID)
         else {
             throw ControlError(code: .internalError, message: "split failed")

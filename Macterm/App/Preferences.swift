@@ -2,8 +2,8 @@ import AppKit
 import Foundation
 import Observation
 
-/// Determines whether a new tab starts in the project directory or the focused pane's cwd.
-enum NewTabWorkingDirectory: String, CaseIterable, Identifiable {
+/// Determines whether a new terminal starts in the project directory or the focused pane's cwd.
+enum NewTerminalWorkingDirectory: String, CaseIterable, Identifiable {
     case projectDirectory = "project"
     case activePaneDirectory = "active_pane"
 
@@ -16,8 +16,8 @@ enum NewTabWorkingDirectory: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Uses the active pane cwd when selected and nonempty. Otherwise, uses the project directory.
-    func resolveNewTabDirectory(projectDirectory: String, activePaneDirectory: String?) -> String {
+    /// Uses the active pane cwd when selected and available. Otherwise, uses the project directory.
+    func resolveNewTerminalDirectory(projectDirectory: String, activePaneDirectory: String?) -> String {
         guard self == .activePaneDirectory,
               let activePaneDirectory,
               !activePaneDirectory.isEmpty
@@ -239,8 +239,13 @@ final class Preferences {
     }
 
     /// Selection shown by "New tab directory" in Settings.
-    var newTabWorkingDirectory: NewTabWorkingDirectory {
+    var newTabWorkingDirectory: NewTerminalWorkingDirectory {
         didSet { defaults.set(newTabWorkingDirectory.rawValue, forKey: Keys.newTabWorkingDirectory) }
+    }
+
+    /// Selection shown by "New split directory" in Settings.
+    var newSplitWorkingDirectory: NewTerminalWorkingDirectory {
+        didSet { defaults.set(newSplitWorkingDirectory.rawValue, forKey: Keys.newSplitWorkingDirectory) }
     }
 
     /// Presentation used by `peekSidebarWhenHidden`. The pinned sidebar is
@@ -719,8 +724,12 @@ final class Preferences {
         self.defaults = defaults
         autoTilingEnabled = defaults.bool(forKey: Keys.autoTiling)
         terminalScrollSpeed = Self.clampScrollSpeed(defaults.double(forKey: Keys.terminalScrollSpeed), fallback: 1.0)
+        // Defaults preserve the behavior from before these preferences existed:
+        // new tabs started at the project root; splits inherited the active pane cwd.
         newTabWorkingDirectory = (defaults.string(forKey: Keys.newTabWorkingDirectory))
-            .flatMap(NewTabWorkingDirectory.init(rawValue:)) ?? .projectDirectory
+            .flatMap(NewTerminalWorkingDirectory.init(rawValue:)) ?? .projectDirectory
+        newSplitWorkingDirectory = (defaults.string(forKey: Keys.newSplitWorkingDirectory))
+            .flatMap(NewTerminalWorkingDirectory.init(rawValue:)) ?? .activePaneDirectory
         sidebarPeekStyle = (defaults.string(forKey: Keys.sidebarPeekStyle))
             .flatMap(SidebarPeekStyle.init(rawValue:)) ?? .resizeTerminal
         windowOpacity = (defaults.object(forKey: Keys.windowOpacity) as? Double) ?? 1.0
@@ -867,6 +876,7 @@ final class Preferences {
         static let autoTiling = "macterm.autoTiling.enabled"
         static let terminalScrollSpeed = "macterm.terminal.scrollSpeed"
         static let newTabWorkingDirectory = "macterm.tabs.newTabWorkingDirectory"
+        static let newSplitWorkingDirectory = "macterm.panes.newSplitWorkingDirectory"
         static let sidebarPeekStyle = "macterm.sidebar.presentation"
         static let windowOpacity = "macterm.window.opacity"
         static let windowBlurRadius = "macterm.window.blurRadius"
