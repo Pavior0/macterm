@@ -1380,26 +1380,6 @@ private struct TabStatusGlyph: View {
     }
 }
 
-private extension AgentIcon {
-    /// The agent's brand tint. These are vendor identity colors, not theme
-    /// colors, so they're the one deliberate exception to "all colors come
-    /// from MactermTheme". Monochrome brands (Cursor, Grok, opencode) use
-    /// `.primary` so they stay black-on-light / white-on-dark like the brand.
-    var brandColor: Color {
-        switch self {
-        case .claude: Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255) // Anthropic coral
-        case .codex: Color(red: 0xAB / 255, green: 0xAB / 255, blue: 0xAB / 255) // OpenAI light gray
-        case .gemini: Color(red: 0x42 / 255, green: 0x85 / 255, blue: 0xF4 / 255) // Google blue
-        case .copilot: Color(red: 0x89 / 255, green: 0x57 / 255, blue: 0xE5 / 255) // GitHub purple
-        case .antigravity: Color(red: 0x31 / 255, green: 0x86 / 255, blue: 0xFF / 255) // Google Antigravity blue
-        case .opencode,
-             .cursor,
-             .grok,
-             .pi: .primary
-        }
-    }
-}
-
 private struct SidebarRowIcon: View {
     let symbol: String
     let index: Int

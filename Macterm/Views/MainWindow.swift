@@ -107,7 +107,8 @@ struct MainWindow: View {
 
     private var peekExitPadding: CGFloat { SidebarOverlayMetrics.hoverExitPadding }
     private var isNativeSidebarInteractive: Bool {
-        appState.sidebarVisible || activePeekStyle == .resizeTerminal
+        preferences.workspaceTabLayout == .vertical
+            && (appState.sidebarVisible || activePeekStyle == .resizeTerminal)
     }
 
     var body: some View {
@@ -117,11 +118,12 @@ struct MainWindow: View {
         // Read in body, not inside the toolbar builder, so the Observation
         // dependency is registered and a Settings change re-places the item.
         let switcherPosition = preferences.tabSwitcherPosition
+        let tabLayout = preferences.workspaceTabLayout
         // Hiding the window toolbar (#226) also drops the titlebar itself,
         // traffic lights included — that's AppKit's behavior for a toolbar-less
         // fullSizeContentView window, not something we do separately. Read in
         // body so flipping the setting re-applies live.
-        let chromeHidden = preferences.hideTitleBar
+        let chromeHidden = preferences.hideTitleBar && tabLayout == .vertical
         return NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarContent(
                 presentation: sidebarPresentation,
@@ -172,39 +174,45 @@ struct MainWindow: View {
                     WelcomeView()
                 }
             }
+            .modifier(HorizontalTerminalContainerModifier(
+                isPresented: tabLayout == .horizontal,
+                windowCornerRadius: windowCornerRadius
+            ))
             // Same safe-area reclaim as the sidebar: without it the terminal
             // keeps a blank strip where the hidden titlebar used to be.
             .ignoresSafeArea(chromeHidden ? .container : [], edges: .top)
-            .navigationTitle(activeProject?.name ?? appDisplayName)
-            .navigationSubtitle(activeTabTitle)
+            .navigationTitle(tabLayout == .horizontal ? "" : (activeProject?.name ?? appDisplayName))
+            .navigationSubtitle(tabLayout == .horizontal ? "" : activeTabTitle)
             .onGeometryChange(for: CGFloat.self) { proxy in
                 proxy.size.width
             } action: { width in
                 detailWidth = width
             }
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    UpdateAvailableToolbarButton()
-                }
-                // Structural branch, not a placement ternary: each side is its
-                // own toolbar item identity, so flipping the preference tears
-                // down and re-places the control instead of relying on AppKit
-                // migrating an existing item between toolbar slots.
-                if switcherPosition == .leading {
-                    // `.navigation` is the leading slot — AppKit puts it ahead
-                    // of the inline window title, next to the sidebar (#186).
-                    ToolbarItem(placement: .navigation) {
-                        TabSwitcherToolbarItem(availableWidth: detailWidth)
-                    }
-                } else {
+                if tabLayout == .vertical {
                     ToolbarItem(placement: .primaryAction) {
-                        TabSwitcherToolbarItem(availableWidth: detailWidth)
+                        UpdateAvailableToolbarButton()
+                    }
+                    // Structural branch, not a placement ternary: each side is its
+                    // own toolbar item identity, so flipping the preference tears
+                    // down and re-places the control instead of relying on AppKit
+                    // migrating an existing item between toolbar slots.
+                    if switcherPosition == .leading {
+                        // `.navigation` is the leading slot — AppKit puts it ahead
+                        // of the inline window title, next to the sidebar (#186).
+                        ToolbarItem(placement: .navigation) {
+                            TabSwitcherToolbarItem(availableWidth: detailWidth)
+                        }
+                    } else {
+                        ToolbarItem(placement: .primaryAction) {
+                            TabSwitcherToolbarItem(availableWidth: detailWidth)
+                        }
                     }
                 }
             }
         }
         .overlay(alignment: .leading) {
-            if isOverlayPeeking, !appState.sidebarVisible {
+            if tabLayout == .vertical, isOverlayPeeking, !appState.sidebarVisible {
                 SidebarOverlayPanel(
                     width: sidebarWidth,
                     chromeHidden: chromeHidden,
@@ -219,6 +227,11 @@ struct MainWindow: View {
             }
         }
         .toolbar(chromeHidden ? .hidden : .visible, for: .windowToolbar)
+        .modifier(WorkspaceTabToolbarModifier(layout: tabLayout))
+        .background(HorizontalTabBarAccessory(
+            isPresented: tabLayout == .horizontal,
+            availableWidth: detailWidth
+        ))
         .background(WindowStyler(
             hideTitle: chromeHidden,
             windowCornerRadius: $windowCornerRadius,
@@ -256,6 +269,10 @@ struct MainWindow: View {
         }
         .onChange(of: initialNativeSidebarVisible) { _, visible in
             guard let visible else { return }
+            guard preferences.workspaceTabLayout == .vertical else {
+                columnVisibility = .detailOnly
+                return
+            }
             let resolution = SidebarPeekInteraction.launchResolution(
                 nativeVisible: visible,
                 modelVisible: appState.sidebarVisible
@@ -269,6 +286,10 @@ struct MainWindow: View {
             }
         }
         .onChange(of: appState.sidebarVisible) { _, visible in
+            if preferences.workspaceTabLayout == .horizontal {
+                columnVisibility = .detailOnly
+                return
+            }
             let isInitialReconciliation = initialSidebarVisibilityBeingApplied == visible
             if isInitialReconciliation { initialSidebarVisibilityBeingApplied = nil }
             cancelDeferredPeek()
@@ -301,6 +322,12 @@ struct MainWindow: View {
             }
         }
         .onChange(of: columnVisibility) { _, visibility in
+            if preferences.workspaceTabLayout == .horizontal {
+                if visibility != .detailOnly {
+                    DispatchQueue.main.async { columnVisibility = .detailOnly }
+                }
+                return
+            }
             // The column can move without going through AppState (toolbar
             // button, drag-out); mirror it back so the toggle shortcut acts on
             // what's on screen — desynced, it needed two presses to re-hide.
@@ -348,6 +375,9 @@ struct MainWindow: View {
             suppressPeekUntilExit = true
             endPeek(allowCancellation: false)
         }
+        .onChange(of: preferences.workspaceTabLayout, initial: true) { _, layout in
+            applyWorkspaceTabLayout(layout)
+        }
         .onChange(of: preferences.peekSidebarWhenHidden) { _, enabled in
             if !enabled {
                 cancelDeferredPeek()
@@ -378,6 +408,28 @@ struct MainWindow: View {
             if overlayMenuTrackingDepth == 0, isOverlayPeeking, lastHoverPoint == nil {
                 scheduleOverlayWindowExit()
             }
+        }
+    }
+
+    /// Switches navigation chrome without changing the active project, tab, or terminal surfaces.
+    private func applyWorkspaceTabLayout(_ layout: WorkspaceTabLayout) {
+        cancelDeferredPeek()
+        cancelDeferredUnpeek()
+        cancelOverlayWindowExit()
+        activePeekStyle = nil
+        suppressPeekUntilExit = false
+
+        switch layout {
+        case .horizontal:
+            columnVisibility = .detailOnly
+
+        case .vertical:
+            columnVisibility = appState.sidebarVisible ? .automatic : .detailOnly
+        }
+
+        DispatchQueue.main.async {
+            guard let window = (NSApp.delegate as? AppDelegate)?.mainWindow else { return }
+            WindowAppearance.sync(window: window)
         }
     }
 
@@ -447,6 +499,7 @@ struct MainWindow: View {
     /// split-view column; the overlay style leaves that column hidden and
     /// draws a separate glass panel over the terminal.
     private func handleSidebarPeekHover(_ phase: HoverPhase) {
+        guard preferences.workspaceTabLayout == .vertical else { return }
         switch phase {
         case let .active(point):
             let previousPoint = lastHoverPoint
@@ -742,6 +795,60 @@ struct MainWindow: View {
         // The pinned workspace has no project directory worth advertising.
         if project.id == PinnedTabs.projectID { return "" }
         return project.path
+    }
+}
+
+/// Insets the horizontal-mode terminal into a border whose radius stays
+/// concentric with the system-owned outer window corner.
+private struct HorizontalTerminalContainerModifier: ViewModifier {
+    private static let windowEdgeInset: CGFloat = 8
+    /// The NavigationSplitView detail already reserves the unified title-bar
+    /// safe area. Pull four points back into it so the terminal border visually
+    /// follows the tabs instead of receiving a second full margin.
+    private static let topBarMargin: CGFloat = -4
+    private static let terminalContentInset: CGFloat = 8
+
+    let isPresented: Bool
+    let windowCornerRadius: CGFloat?
+
+    private var innerCornerRadius: CGFloat {
+        WindowConcentricCornerMetrics.innerRadius(
+            outerRadius: windowCornerRadius,
+            edgeInset: Self.windowEdgeInset
+        )
+    }
+
+    func body(content: Content) -> some View {
+        if isPresented {
+            let containerShape = RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous)
+            content
+                .padding(Self.terminalContentInset)
+                .background(MactermTheme.terminalBg)
+                .clipShape(containerShape)
+                .overlay {
+                    containerShape
+                        .strokeBorder(MactermTheme.border, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .padding(.horizontal, Self.windowEdgeInset)
+                .padding(.top, Self.topBarMargin)
+                .padding(.bottom, Self.windowEdgeInset)
+        } else {
+            content
+        }
+    }
+}
+
+/// Removes the native sidebar toggle while horizontal tabs own the title bar.
+private struct WorkspaceTabToolbarModifier: ViewModifier {
+    let layout: WorkspaceTabLayout
+
+    func body(content: Content) -> some View {
+        if layout == .horizontal {
+            content.toolbar(removing: .sidebarToggle)
+        } else {
+            content
+        }
     }
 }
 

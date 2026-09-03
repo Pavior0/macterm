@@ -43,6 +43,21 @@ enum TabSwitcherVisibility: String, CaseIterable, Identifiable {
     }
 }
 
+/// Chooses whether workspace tabs navigate from the project sidebar or the window title bar.
+enum WorkspaceTabLayout: String, CaseIterable, Identifiable {
+    case vertical
+    case horizontal
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .vertical: "Vertical"
+        case .horizontal: "Horizontal"
+        }
+    }
+}
+
 /// Which edge of the title bar the numbered tab switcher sits on (#186).
 /// `leading` maps to the `.navigation` toolbar slot, which AppKit places
 /// ahead of the inline window title — the switcher hugs the sidebar edge
@@ -252,6 +267,11 @@ final class Preferences {
     /// always the native split-view column.
     var sidebarPeekStyle: SidebarPeekStyle {
         didSet { defaults.set(sidebarPeekStyle.rawValue, forKey: Keys.sidebarPeekStyle) }
+    }
+
+    /// Navigation layout for projects and their tabs in the main window.
+    var workspaceTabLayout: WorkspaceTabLayout {
+        didSet { defaults.set(workspaceTabLayout.rawValue, forKey: Keys.workspaceTabLayout) }
     }
 
     // MARK: - Sidebar icons
@@ -732,6 +752,8 @@ final class Preferences {
             .flatMap(NewTerminalWorkingDirectory.init(rawValue:)) ?? .activePaneDirectory
         sidebarPeekStyle = (defaults.string(forKey: Keys.sidebarPeekStyle))
             .flatMap(SidebarPeekStyle.init(rawValue:)) ?? .resizeTerminal
+        workspaceTabLayout = (defaults.string(forKey: Keys.workspaceTabLayout))
+            .flatMap(WorkspaceTabLayout.init(rawValue:)) ?? .vertical
         windowOpacity = (defaults.object(forKey: Keys.windowOpacity) as? Double) ?? 1.0
         windowBlurRadius = defaults.integer(forKey: Keys.windowBlurRadius)
         windowGlassEnabled = defaults.object(forKey: Keys.windowGlassEnabled) as? Bool ?? false
@@ -878,6 +900,7 @@ final class Preferences {
         static let newTabWorkingDirectory = "macterm.tabs.newTabWorkingDirectory"
         static let newSplitWorkingDirectory = "macterm.panes.newSplitWorkingDirectory"
         static let sidebarPeekStyle = "macterm.sidebar.presentation"
+        static let workspaceTabLayout = "macterm.tabs.layout"
         static let windowOpacity = "macterm.window.opacity"
         static let windowBlurRadius = "macterm.window.blurRadius"
         static let windowGlassEnabled = "macterm.window.glassEnabled"

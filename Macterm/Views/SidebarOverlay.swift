@@ -174,8 +174,10 @@ enum SidebarOverlayMetrics {
     }
 
     static func cornerRadius(windowCornerRadius: CGFloat?, inset: CGFloat) -> CGFloat {
-        guard let windowCornerRadius, windowCornerRadius > 0 else { return 0 }
-        return max(windowCornerRadius - inset, 0)
+        WindowConcentricCornerMetrics.innerRadius(
+            outerRadius: windowCornerRadius,
+            edgeInset: inset
+        )
     }
 
     static func resizedWidth(start: CGFloat, delta: CGFloat) -> CGFloat {

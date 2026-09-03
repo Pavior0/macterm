@@ -14,6 +14,14 @@ enum MactermTheme {
     /// next sample takes it away again.
     @MainActor
     static var nsConfiguredBg: NSColor { GhosttyApp.shared.backgroundColor }
+    /// Window chrome background derived from the active terminal theme. A small
+    /// foreground blend separates the shell from the renderer without creating
+    /// a second palette that can drift from the user's Ghostty configuration.
+    @MainActor
+    static var nsWindowChromeBg: NSColor {
+        nsBg.blended(withFraction: 0.06, of: nsFg) ?? nsBg
+    }
+
     @MainActor
     static var fg: Color { Color(nsColor: nsFg) }
     @MainActor

@@ -394,6 +394,14 @@ final class MactermGlassView: NSView {
 /// macOS 26+ so we only ship the Tahoe path.
 @MainActor
 enum WindowAppearance {
+    /// Horizontal tabs expose the window shell around an inset terminal. Keep
+    /// vertical mode's established edge-to-edge terminal background unchanged.
+    private static var mainWindowBackgroundColor: NSColor {
+        Preferences.shared.workspaceTabLayout == .horizontal
+            ? MactermTheme.nsWindowChromeBg
+            : MactermTheme.nsBg
+    }
+
     /// Apply the current opacity/blur settings to `window`. Safe to call any
     /// time — re-applies idempotently. Should be called after the window is
     /// onscreen, on theme changes, and on focus changes (AppKit recreates
@@ -401,7 +409,7 @@ enum WindowAppearance {
     static func sync(window: NSWindow) {
         let opacity = Preferences.shared.windowOpacity
         let blurRadius = Preferences.shared.windowBlurRadius
-        let bg = MactermTheme.nsBg
+        let bg = mainWindowBackgroundColor
         let isTransparent = opacity < 1.0
 
         // Native fullscreen draws its own opaque grey background; widgets show
@@ -788,7 +796,7 @@ enum WindowAppearance {
         guard glassSupported else { return }
         if #available(macOS 26.0, *) {
             guard let glass = existingGlass(in: window) else { return }
-            glass.updateKeyStatus(window.isKeyWindow, backgroundColor: MactermTheme.nsBg)
+            glass.updateKeyStatus(window.isKeyWindow, backgroundColor: mainWindowBackgroundColor)
         }
     }
 
@@ -955,10 +963,13 @@ enum WindowAppearance {
             titlebarView.layer?.backgroundColor = NSColor.clear.cgColor
         }
 
-        // NSTitlebarBackgroundView has subviews that force their own background
-        // colors; hide it only when transparent, so the default opaque-mode
-        // chrome stays intact.
-        container.firstDescendant(withClassName: "NSTitlebarBackgroundView")?.isHidden = isTransparent
+        // Horizontal tabs need the theme-derived window shell to continue
+        // through the unified header. AppKit's opaque titlebar background is
+        // otherwise an unrelated white/grey band behind the accessory. Keep
+        // vertical mode's established opaque system chrome unchanged.
+        let horizontalTabsPresented = Preferences.shared.workspaceTabLayout == .horizontal
+        container.firstDescendant(withClassName: "NSTitlebarBackgroundView")?.isHidden =
+            isTransparent || horizontalTabsPresented
     }
 
     private static func titlebarContainer(in window: NSWindow) -> NSView? {
@@ -994,5 +1005,14 @@ enum WindowAppearance {
         }
         if String(describing: type(of: root)) == "NSTitlebarContainerView" { return root }
         return root.firstDescendant(withClassName: "NSTitlebarContainerView")
+    }
+}
+
+/// Computes inner rounded-container radii from the system-owned window corner.
+/// Subtracting the edge inset keeps the inner and outer arcs concentric.
+enum WindowConcentricCornerMetrics {
+    static func innerRadius(outerRadius: CGFloat?, edgeInset: CGFloat) -> CGFloat {
+        guard let outerRadius, outerRadius > 0 else { return 0 }
+        return max(outerRadius - edgeInset, 0)
     }
 }

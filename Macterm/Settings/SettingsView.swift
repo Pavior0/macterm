@@ -1054,6 +1054,7 @@ private struct AppearanceSettings: View {
     @State private var autoNameTabs: Bool = Preferences.shared.autoNameTabs
     @State private var peekSidebarWhenHidden: Bool = Preferences.shared.peekSidebarWhenHidden
     @State private var showNewProjectButton: Bool = Preferences.shared.showNewProjectButton
+    @State private var workspaceTabLayout: WorkspaceTabLayout = Preferences.shared.workspaceTabLayout
     @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
     @State private var tabSwitcherPosition: String = Preferences.shared.tabSwitcherPosition.rawValue
     @State
@@ -1123,6 +1124,23 @@ private struct AppearanceSettings: View {
                         Preferences.shared.adaptiveTerminalChromeEnabled = enabled
                     }
                 Text("Matches the whole window for a single pane; in a split, only each full-screen app's pane changes color.")
+                    .settingsCaption()
+            }
+
+            Section("Tabs") {
+                Picker("Layout", selection: $workspaceTabLayout) {
+                    ForEach(WorkspaceTabLayout.allCases) { layout in
+                        Text(layout.displayName).tag(layout)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: workspaceTabLayout) { _, layout in
+                    Preferences.shared.workspaceTabLayout = layout
+                }
+
+                Text(workspaceTabLayout == .horizontal
+                    ? "Shows the active project's tabs across the title bar with a searchable project switcher."
+                    : "Shows projects and tabs in the resizable sidebar.")
                     .settingsCaption()
             }
 
@@ -1244,7 +1262,7 @@ private struct AppearanceSettings: View {
                     Text("Left places the switcher before the window title, next to the sidebar.")
                         .settingsCaption()
                 }
-                .disabled(!showToolbar)
+                .disabled(!showToolbar || workspaceTabLayout == .horizontal)
             }
         }
         .formStyle(.grouped)
