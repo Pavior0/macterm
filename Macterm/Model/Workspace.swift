@@ -154,7 +154,11 @@ final class TerminalTab: Identifiable {
         // REMOTE pane, `currentPwd` is a remote-filesystem path with no host
         // prefix — inheriting it would spawn the sibling as a LOCAL shell in a
         // bogus dir instead of a remote zmx session — so skip the live cwd and
-        // inherit the scp-style `projectPath` verbatim.
+        // inherit the scp-style `projectPath` verbatim. An explicit
+        // `newPaneWorkingDirectory` (the "Project" split preference) wins over
+        // the whole chain; the preference resolver passes nil rather than the
+        // project root whenever it has no usable LOCAL cwd, precisely so the
+        // remote/unattached cases keep falling through to it.
         let livePwd = pane.liveLocalWorkingDirectory()
         let sourcePath = newPaneWorkingDirectory ?? livePwd ?? pane.projectPath
         let sourceProjectID = pane.projectID
@@ -178,9 +182,17 @@ final class TerminalTab: Identifiable {
     /// optionally spawning `command` in every NEW pane. The source pane
     /// becomes the top-left cell and keeps its running shell — a command
     /// can only be injected at spawn (`initial_input`), so the caller runs
-    /// text into it separately if needed. Returns the new pane IDs.
+    /// text into it separately if needed. `newPaneWorkingDirectory` overrides
+    /// cwd inheritance for every new cell, exactly as in `split`. Returns the
+    /// new pane IDs.
     @discardableResult
-    func makeGrid(paneID: UUID, rows: Int, columns: Int, command: String? = nil) -> [UUID] {
+    func makeGrid(
+        paneID: UUID,
+        rows: Int,
+        columns: Int,
+        command: String? = nil,
+        newPaneWorkingDirectory: String? = nil
+    ) -> [UUID] {
         guard rows >= 1, columns >= 1, rows * columns > 1,
               splitRoot.findPane(id: paneID) != nil
         else { return [] }
@@ -190,7 +202,12 @@ final class TerminalTab: Identifiable {
         var rowHeads = [paneID]
         for _ in 1 ..< rows {
             guard let previous = rowHeads.last,
-                  let newID = split(paneID: previous, direction: .vertical, command: command)
+                  let newID = split(
+                      paneID: previous,
+                      direction: .vertical,
+                      command: command,
+                      newPaneWorkingDirectory: newPaneWorkingDirectory
+                  )
             else { break }
             rowHeads.append(newID)
             created.append(newID)
@@ -198,7 +215,13 @@ final class TerminalTab: Identifiable {
         for head in rowHeads {
             var current = head
             for _ in 1 ..< columns {
-                guard let newID = split(paneID: current, direction: .horizontal, command: command) else { break }
+                guard let newID = split(
+                    paneID: current,
+                    direction: .horizontal,
+                    command: command,
+                    newPaneWorkingDirectory: newPaneWorkingDirectory
+                )
+                else { break }
                 created.append(newID)
                 current = newID
             }

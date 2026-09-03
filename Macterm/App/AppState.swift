@@ -1222,10 +1222,12 @@ final class AppState {
             return nil
         }
         let activePaneDirectory = focusedPane(for: projectID)?.liveLocalWorkingDirectory()
+        // A brand-new tab has no source pane to inherit from, so an
+        // unusable active-pane cwd (nil) lands in the project directory.
         let newTabDirectory = Preferences.shared.newTabWorkingDirectory.resolveNewTerminalDirectory(
             projectDirectory: projectDirectory,
             activePaneDirectory: activePaneDirectory
-        )
+        ) ?? projectDirectory
         // The cwd is user-selectable, but zmx session grouping remains project-scoped.
         let projectSessionSlug = (projectDirectory as NSString).lastPathComponent
         return createTab(
@@ -1692,10 +1694,14 @@ final class AppState {
               let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil }),
               let pane = tab.splitRoot.findPane(id: paneID)
         else { return nil }
+        // nil = inherit (the source pane's live cwd, else its own
+        // `projectPath`) — never coerced to the project root, which would
+        // turn a remote pane's split into a local shell.
         let newPaneDirectory = Preferences.shared.newSplitWorkingDirectory.resolveNewTerminalDirectory(
             projectDirectory: projectDirectory,
             activePaneDirectory: pane.liveLocalWorkingDirectory()
         )
+        logger.debug("splitPane: \(String(describing: direction), privacy: .public) pane=\(paneID, privacy: .public)")
         return splitPane(
             paneID,
             direction: direction,
@@ -1731,20 +1737,34 @@ final class AppState {
     }
 
     /// Split a pane into an equal `rows`×`columns` grid (see
-    /// `TerminalTab.makeGrid`), spawning `command` in each new pane. Returns
-    /// the new pane IDs.
+    /// `TerminalTab.makeGrid`), spawning `command` in each new pane. Every
+    /// cell honors the new split directory preference, so a grid and a
+    /// `Cmd+D` split off the same pane can't disagree about it. Returns the
+    /// new pane IDs.
     @discardableResult
     func makeGrid(
         _ paneID: UUID,
         rows: Int,
         columns: Int,
         projectID: UUID,
+        projectDirectory: String,
         command: String? = nil
     ) -> [UUID] {
         guard let ws = workspaces[projectID],
-              let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil })
+              let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil }),
+              let pane = tab.splitRoot.findPane(id: paneID)
         else { return [] }
-        let created = tab.makeGrid(paneID: paneID, rows: rows, columns: columns, command: command)
+        let newPaneDirectory = Preferences.shared.newSplitWorkingDirectory.resolveNewTerminalDirectory(
+            projectDirectory: projectDirectory,
+            activePaneDirectory: pane.liveLocalWorkingDirectory()
+        )
+        let created = tab.makeGrid(
+            paneID: paneID,
+            rows: rows,
+            columns: columns,
+            command: command,
+            newPaneWorkingDirectory: newPaneDirectory
+        )
         if !created.isEmpty { saveWorkspaces() }
         return created
     }

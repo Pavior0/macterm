@@ -88,7 +88,7 @@ struct AppStateTests {
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
         let before = tab.focusedPaneID
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         #expect(tab.splitRoot.allPanes().count == 2)
         #expect(tab.focusedPaneID != before)
     }
@@ -118,13 +118,64 @@ struct AppStateTests {
         #expect(tab.focusedPane?.projectPath == project.path)
     }
 
+    /// "Active pane" with no usable LOCAL cwd must fall through to the source
+    /// pane's own `projectPath`, NOT to the project root: a remote pane
+    /// coerced to the project directory loses its declared subdirectory, and
+    /// one whose tab was moved into a local project would spawn a LOCAL shell
+    /// instead of a remote zmx sibling.
+    @Test
+    func splitPane_remote_source_inherits_its_own_path_not_the_project_root() throws {
+        let prior = Preferences.shared.newSplitWorkingDirectory
+        defer { Preferences.shared.newSplitWorkingDirectory = prior }
+        Preferences.shared.newSplitWorkingDirectory = .activePaneDirectory
+
+        let state = makeAppState()
+        let project = seedProject(state, path: "devbox:~/repo")
+        state.createTab(projectID: project.id, projectPath: "devbox:~/repo/sub")
+        let tab = try #require(state.workspaces[project.id]?.activeTab)
+        #expect(tab.focusedPane?.projectPath == "devbox:~/repo/sub")
+
+        state.splitPane(direction: .horizontal, projectID: project.id, projects: [project])
+
+        #expect(tab.focusedPane?.projectPath == "devbox:~/repo/sub")
+        #expect(tab.focusedPane?.isRemote == true)
+    }
+
+    /// A grid honors the split directory preference, so `macterm grid` and a
+    /// `Cmd+D` split off the same pane can't disagree about it.
+    @Test
+    func makeGrid_uses_selected_directory() throws {
+        let prior = Preferences.shared.newSplitWorkingDirectory
+        defer { Preferences.shared.newSplitWorkingDirectory = prior }
+        Preferences.shared.newSplitWorkingDirectory = .projectDirectory
+
+        let state = makeAppState()
+        let project = seedProject(state, path: "/project")
+        let tab = try #require(state.workspaces[project.id]?.activeTab)
+        let source = try #require(tab.focusedPane)
+        source.ensureNSView().currentPwd = "/project/src"
+
+        let created = state.makeGrid(
+            source.id,
+            rows: 2,
+            columns: 2,
+            projectID: project.id,
+            projectDirectory: project.path
+        )
+
+        #expect(created.count == 3)
+        for id in created {
+            #expect(tab.splitRoot.findPane(id: id)?.projectPath == "/project")
+        }
+    }
+
     @Test
     func splitPane_no_focused_pane_is_noop() throws {
         let state = makeAppState()
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
         tab.focusedPaneID = nil
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         #expect(tab.splitRoot.allPanes().count == 1)
     }
 
@@ -175,7 +226,7 @@ struct AppStateTests {
         let state = makeAppState()
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         #expect(tab.splitRoot.allPanes().count == 2)
         let target = try #require(tab.focusedPaneID)
         state.closePane(target, projectID: p.id)
@@ -208,7 +259,7 @@ struct AppStateTests {
         let p = seedProject(state)
         let ws = try #require(state.workspaces[p.id])
         let originalTab = try #require(ws.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let targetInOriginal = try #require(originalTab.focusedPaneID)
 
         // Switch to a new tab, then close a pane on the (now non-active) original.
@@ -323,7 +374,7 @@ struct AppStateTests {
         let p = seedProject(state)
         let ws = try #require(state.workspaces[p.id])
         let destTab = try #require(ws.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let sourceTab = ws.createTab(projectPath: p.path)
         ws.selectTab(destTab.id)
 
@@ -356,8 +407,8 @@ struct AppStateTests {
         let p = seedProject(state)
         let ws = try #require(state.workspaces[p.id])
         let tab = try #require(ws.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
-        state.splitPane(direction: .vertical, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
+        state.splitPane(direction: .vertical, projectID: p.id, projects: [p])
         let panes = tab.splitRoot.allPanes().map(\.id)
         #expect(panes.count == 3)
 
@@ -392,7 +443,7 @@ struct AppStateTests {
         let ws = try #require(state.workspaces[p.id])
         let tab = try #require(ws.activeTab)
         let original = try #require(tab.focusedPaneID)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let dragged = try #require(tab.focusedPaneID)
         tab.zoomedPaneID = dragged
 
@@ -416,7 +467,7 @@ struct AppStateTests {
         let p = seedProject(state)
         let ws = try #require(state.workspaces[p.id])
         let tab = try #require(ws.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let dragged = try #require(tab.focusedPaneID)
 
         state.separatePane(dragged, toProject: p.id, destPath: p.path, at: 0)
@@ -434,7 +485,7 @@ struct AppStateTests {
         let ws1 = try #require(state.workspaces[p1.id])
         let ws2 = try #require(state.workspaces[p2.id])
         state.selectProject(p1)
-        state.splitPane(direction: .horizontal, projectID: p1.id)
+        state.splitPane(direction: .horizontal, projectID: p1.id, projects: [p1])
         let sourceTab = try #require(ws1.activeTab)
         let dragged = try #require(sourceTab.focusedPaneID)
         let ws2TabsBefore = ws2.tabs.count
@@ -764,7 +815,7 @@ struct AppStateTests {
         let state = makeAppState()
         let p = seedProject(state)
         let ws = try #require(state.workspaces[p.id])
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         ws.createTab(projectPath: "/tmp")
         ws.tabs[1].customTitle = "build"
         let beforePaneIDs = Set(ws.tabs.flatMap { $0.splitRoot.allPanes().map(\.id) })
@@ -977,7 +1028,7 @@ struct AppStateTests {
         let state = makeAppState()
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let target = try #require(tab.focusedPaneID)
         // No GhosttyTerminalNSView is ever created in tests, so needsConfirmQuit is false.
         state.requestClosePane(target, projectID: p.id)
@@ -1644,7 +1695,7 @@ struct AppStateTests {
         state.zmx = recordingZmx(into: killed)
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let names = Set(tab.splitRoot.allPanes().map(\.sessionName))
         #expect(names.count == 2)
 
@@ -1666,7 +1717,7 @@ struct AppStateTests {
         state.zmx = recordingZmx(into: killed, remoteInto: remoteKilled)
         let p = seedProject(state, name: "remote", path: "devbox:~/dev/api")
         let tab = try #require(state.workspaces[p.id]?.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let target = try #require(tab.focusedPaneID)
         let targetName = try #require(tab.splitRoot.findPane(id: target)?.sessionName)
 
@@ -1704,7 +1755,7 @@ struct AppStateTests {
         let state = makeAppState()
         state.zmx = recordingZmx(into: killed)
         let p = seedProject(state)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let tab = try #require(state.workspaces[p.id]?.activeTab)
         let target = try #require(tab.focusedPaneID)
         let name = try #require(tab.splitRoot.findPane(id: target)?.sessionName)
@@ -1853,7 +1904,7 @@ struct AppStateTests {
         state.zmx = recordingZmx(into: killed)
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let target = try #require(tab.focusedPaneID)
         let targetName = try #require(tab.splitRoot.findPane(id: target)?.sessionName)
 
@@ -1869,7 +1920,7 @@ struct AppStateTests {
         let state = makeAppState()
         state.zmx = recordingZmx(into: killed)
         let p = seedProject(state)
-        state.splitPane(direction: .horizontal, projectID: p.id)
+        state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         let names = try Set(
             #require(state.workspaces[p.id]).tabs
                 .flatMap { $0.splitRoot.allPanes() }
@@ -1910,7 +1961,7 @@ struct AppStateTests {
         let p2 = seedProject(state, name: "p2", path: "/tmp2")
         let tab = try #require(state.workspaces[p1.id]?.activeTab)
         // Split so the moved tab carries more than one pane to restamp.
-        state.splitPane(direction: .horizontal, projectID: p1.id)
+        state.splitPane(direction: .horizontal, projectID: p1.id, projects: [p1])
         let panes = tab.splitRoot.allPanes()
         #expect(panes.count == 2)
         let originalSessionNames = Set(panes.map(\.sessionName))

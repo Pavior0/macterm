@@ -16,12 +16,19 @@ enum NewTerminalWorkingDirectory: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Uses the active pane cwd when selected and available. Otherwise, uses the project directory.
-    func resolveNewTerminalDirectory(projectDirectory: String, activePaneDirectory: String?) -> String {
-        guard self == .activePaneDirectory,
-              let activePaneDirectory,
-              !activePaneDirectory.isEmpty
-        else { return projectDirectory }
+    /// The directory a new terminal must start in, or nil for "keep the
+    /// caller's own inheritance". Nil is only ever "Active pane" with no
+    /// usable LOCAL cwd — every remote pane, and any pane whose surface
+    /// isn't up yet — and coercing that case to the project root would be
+    /// wrong: `TerminalTab.split` inherits a remote pane's scp-style
+    /// `projectPath` verbatim, so overriding it spawns a LOCAL shell at the
+    /// project root instead of a remote sibling (and a pinned pane, whose
+    /// own `projectPath` IS its cwd, would land at home). Callers with
+    /// nothing to inherit from (a brand-new tab) coalesce to the project
+    /// directory themselves.
+    func resolveNewTerminalDirectory(projectDirectory: String, activePaneDirectory: String?) -> String? {
+        guard self == .activePaneDirectory else { return projectDirectory }
+        guard let activePaneDirectory, !activePaneDirectory.isEmpty else { return nil }
         return activePaneDirectory
     }
 }
