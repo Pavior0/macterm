@@ -61,7 +61,9 @@ mkdir -p ~/.config/macterm/signing && cd ~/.config/macterm/signing
   -out macterm-signing.p12
 gh secret set MACTERM_SIGNING_CERT_P12 --repo thdxg/macterm --body "$(base64 -i macterm-signing.p12)"
 gh secret set MACTERM_SIGNING_CERT_PASSWORD --repo thdxg/macterm --body "$(cat macterm-signing.password)"
-``` GhosttyKit needs no secret: `thdxg/ghostty` is public, so `setup.sh`'s release downloads run under `GITHUB_TOKEN` here as in every other workflow. The workflow appends an `<item>` to `appcast.xml` on `gh-pages` (served at `https://thdxg.github.io/macterm/appcast.xml`, the feed URL in `Info.plist`) along with a per-version notes page rendered from the GitHub Release body (`publish-appcast.sh`).
+```
+
+GhosttyKit needs no secret: `thdxg/ghostty` is public, so `setup.sh`'s release downloads run under `GITHUB_TOKEN` here as in every other workflow. The workflow appends an `<item>` to `appcast.xml` on `gh-pages` (served at `https://thdxg.github.io/macterm/appcast.xml`, the feed URL in `Info.plist`) along with a per-version notes page rendered from the GitHub Release body (`publish-appcast.sh`).
 
 **Release notes come from GitHub's native generator**, configured by `.github/release.yml` (categories keyed on the `enhancement`/`bug`/`chore`/`dependencies`/`documentation` labels, `skip-changelog` excluded, a trailing `*` catch-all so nothing is silently dropped — GitHub assigns each PR to the first matching category, so that entry must stay last). `release-drafter` used to maintain a rolling draft and derive the next version from PR labels; it was removed as redundant now that the notes are native. The tradeoff is deliberate: **the version number is chosen by hand when cutting a release**, since native notes only ever describe a tag that already exists. That is also what keeps `vX.Y.Z-beta.N` prerelease tags simple — nothing tries to compute them.
 
