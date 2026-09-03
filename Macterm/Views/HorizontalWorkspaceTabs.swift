@@ -10,6 +10,8 @@ struct HorizontalWorkspaceTabs: View {
     private var appState
     @Environment(ProjectStore.self)
     private var projectStore
+    @Environment(\.accessibilityReduceMotion)
+    private var reduceMotion
     @State
     private var draggedTabID: UUID?
     @State
@@ -75,7 +77,7 @@ struct HorizontalWorkspaceTabs: View {
                                 )
                             }
                             .onEnded { _ in
-                                withAnimation(.smooth(duration: 0.12)) {
+                                withAnimation(reduceMotion ? nil : .smooth(duration: 0.12)) {
                                     draggedTabID = nil
                                     dragLocation = nil
                                     dragSourceSize = nil
@@ -97,7 +99,7 @@ struct HorizontalWorkspaceTabs: View {
                     }
                 }
                 .padding(.horizontal, 1)
-                .animation(.smooth(duration: 0.16), value: workspace.tabs.map(\.id))
+                .animation(reduceMotion ? nil : .smooth(duration: 0.16), value: workspace.tabs.map(\.id))
             }
             .coordinateSpace(name: Self.coordinateSpace)
             .onPreferenceChange(HorizontalTabFramePreferenceKey.self) { frames in
@@ -303,7 +305,7 @@ struct HorizontalWorkspaceTabs: View {
         let dropOffset = destinationIndex > sourceIndex
             ? destinationIndex + 1
             : destinationIndex
-        withAnimation(.smooth(duration: 0.16)) {
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.16)) {
             appState.reorderTab(
                 tabID,
                 inProject: workspace.projectID,
@@ -323,7 +325,7 @@ struct HorizontalWorkspaceTabs: View {
 
     private func scrollToActiveTab(_ proxy: ScrollViewProxy, animated: Bool) {
         guard let activeTabID = workspace.activeTabID else { return }
-        if animated {
+        if animated, !reduceMotion {
             withAnimation(.easeOut(duration: 0.16)) {
                 proxy.scrollTo(activeTabID, anchor: .trailing)
             }

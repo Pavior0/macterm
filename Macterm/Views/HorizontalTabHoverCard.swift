@@ -78,11 +78,7 @@ struct HorizontalTabHoverCard: View {
         }
         .padding(12)
         .frame(width: 300)
-        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.primary.opacity(0.10), lineWidth: 0.5)
-        }
+        .horizontalPopoverSurface()
         .task(id: workingDirectory) {
             guard let workingDirectory else {
                 branchState = .unavailable
@@ -146,28 +142,4 @@ private enum HorizontalTabBranchState {
     case loading
     case available(String)
     case unavailable
-}
-
-private enum HorizontalTabGitBranchLookup {
-    nonisolated static func branch(at workingDirectory: String) async -> String? {
-        await Task.detached(priority: .utility) {
-            let process = Process()
-            let output = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["-C", workingDirectory, "branch", "--show-current"]
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                process.waitUntilExit()
-            } catch {
-                return nil
-            }
-            guard process.terminationStatus == 0 else { return nil }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let branch = String(decoding: data, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return branch.isEmpty ? nil : branch
-        }.value
-    }
 }

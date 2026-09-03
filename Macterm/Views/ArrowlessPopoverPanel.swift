@@ -74,10 +74,18 @@ struct ArrowlessPopoverPresenter: NSViewRepresentable {
 
             self.panel = panel
             self.hostingView = hostingView
-            position(panel, below: anchorView)
+            let finalOrigin = position(panel, below: anchorView)
 
             guard !panel.isVisible else { return }
             panel.alphaValue = 0
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            if !reduceMotion {
+                let approachesFromAbove = finalOrigin.y < anchorScreenRect(for: anchorView).minY
+                panel.setFrameOrigin(NSPoint(
+                    x: finalOrigin.x,
+                    y: finalOrigin.y + (approachesFromAbove ? 3 : -3)
+                ))
+            }
             if acceptsKeyboardInput {
                 panel.makeKeyAndOrderFront(nil)
             } else {
@@ -87,6 +95,9 @@ struct ArrowlessPopoverPresenter: NSViewRepresentable {
                 context.duration = 0.10
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1
+                if !reduceMotion {
+                    panel.animator().setFrameOrigin(finalOrigin)
+                }
             }
         }
 
@@ -108,7 +119,13 @@ struct ArrowlessPopoverPresenter: NSViewRepresentable {
             panel.acceptsKeyboardInput = acceptsKeyboardInput
             panel.isOpaque = false
             panel.backgroundColor = .clear
-            panel.hasShadow = true
+            if #available(macOS 26.0, *) {
+                // Liquid Glass draws its own adaptive edge and depth. A window
+                // shadow directly beneath it reads as a second black border.
+                panel.hasShadow = false
+            } else {
+                panel.hasShadow = true
+            }
             panel.level = .popUpMenu
             panel.hidesOnDeactivate = true
             panel.animationBehavior = .none
@@ -116,11 +133,9 @@ struct ArrowlessPopoverPresenter: NSViewRepresentable {
             return panel
         }
 
-        private func position(_ panel: NSPanel, below anchorView: NSView) {
-            guard let window = anchorView.window else { return }
-            let windowRect = anchorView.convert(anchorView.bounds, to: nil)
-            let anchorRect = window.convertToScreen(windowRect)
-            let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        private func position(_ panel: NSPanel, below anchorView: NSView) -> NSPoint {
+            let anchorRect = anchorScreenRect(for: anchorView)
+            let visibleFrame = anchorView.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
             let preferredX = anchorRect.minX
             let clampedX = min(
                 max(preferredX, visibleFrame.minX + 8),
@@ -129,7 +144,15 @@ struct ArrowlessPopoverPresenter: NSViewRepresentable {
             let belowY = anchorRect.minY - panel.frame.height - 6
             let aboveY = anchorRect.maxY + 6
             let y = belowY >= visibleFrame.minY + 8 ? belowY : aboveY
-            panel.setFrameOrigin(NSPoint(x: clampedX, y: y))
+            let origin = NSPoint(x: clampedX, y: y)
+            panel.setFrameOrigin(origin)
+            return origin
+        }
+
+        private func anchorScreenRect(for anchorView: NSView) -> NSRect {
+            guard let window = anchorView.window else { return .zero }
+            let windowRect = anchorView.convert(anchorView.bounds, to: nil)
+            return window.convertToScreen(windowRect)
         }
     }
 }

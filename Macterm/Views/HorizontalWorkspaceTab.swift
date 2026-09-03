@@ -103,7 +103,7 @@ struct HorizontalWorkspaceTab: View {
             return
         }
         hoverPresentationTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(280))
+            try? await Task.sleep(for: .milliseconds(220))
             guard !Task.isCancelled, isHovering, !hoverSuppressed else { return }
             isHoverCardPresented = true
         }

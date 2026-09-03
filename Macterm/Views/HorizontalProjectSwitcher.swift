@@ -80,11 +80,7 @@ struct HorizontalProjectSwitcher: View {
         }
         .padding(10)
         .frame(width: 320)
-        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.primary.opacity(0.10), lineWidth: 0.5)
-        }
+        .horizontalPopoverSurface()
         .onAppear { searchIsFocused = true }
     }
 
