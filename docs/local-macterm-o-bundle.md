@@ -9,7 +9,7 @@ Macterm Dev applications as `Macterm O`.
 - Bundle ID: `com.thdxg.macterm.o`
 - Display name: `Macterm O`
 - Source branch: `feat/horizontal-tabs`
-- Source commit: `07ce8ab1b586dde4f21c1261ab0541470b3a195f`
+- Source commit: `3a5f4e395877ea07cbe97e94d33802c7fec2b70a`
 - Build configuration: `Release`
 - Marketing version: `0.0.0`
 - Bundle version: `0.0.0.9999`
