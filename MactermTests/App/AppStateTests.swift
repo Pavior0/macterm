@@ -138,6 +138,24 @@ struct AppStateTests {
     }
 
     @Test
+    func recent_tab_switcher_limits_candidates_to_five_most_recent_tabs() throws {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+        Preferences.shared.showRecentTabSwitcher = true
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        for _ in 0 ..< 6 {
+            state.createTab(projectID: project.id, projects: [project])
+        }
+
+        state.cycleRecentTab(projectID: project.id)
+
+        #expect(state.recentTabCycle?.tabIDs == Array(workspace.recencyOrder().prefix(5)))
+    }
+
+    @Test
     func recent_tab_direct_mode_previews_restores_and_commits_mru() throws {
         let prior = Preferences.shared.showRecentTabSwitcher
         defer { Preferences.shared.showRecentTabSwitcher = prior }

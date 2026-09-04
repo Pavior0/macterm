@@ -1591,7 +1591,10 @@ final class AppState {
             cancelRecentTabCycle()
         }
         if recentTabCycle == nil {
-            let tabIDs = workspace.recencyOrder()
+            let recencyOrder = workspace.recencyOrder()
+            let tabIDs = showsSwitcher
+                ? Array(recencyOrder.prefix(RecentTabCycle.maximumSwitcherItems))
+                : recencyOrder
             guard tabIDs.count > 1, let originalTabID = workspace.activeTabID else { return }
             recentTabCycle = RecentTabCycle(
                 projectID: projectID,
