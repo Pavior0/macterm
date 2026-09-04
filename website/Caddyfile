@@ -49,7 +49,7 @@
 	@static path *.css *.js *.xml *.txt
 	@pages not path /assets/* /img/* *.css *.js *.xml *.txt
 	header @media Cache-Control "public, max-age=86400"
-	header @static Cache-Control "public, max-age=3600"
+	header @static Cache-Control "public, max-age=0, must-revalidate"
 	header @pages Cache-Control "public, max-age=0, must-revalidate"
 	header X-Content-Type-Options nosniff
 	header -Server
