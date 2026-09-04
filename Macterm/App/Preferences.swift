@@ -329,6 +329,11 @@ final class Preferences {
         didSet { defaults.set(autoNameTabs, forKey: Keys.autoNameTabs) }
     }
 
+    /// Off by default to preserve the existing Ctrl+Tab behavior.
+    var showRecentTabSwitcher: Bool {
+        didSet { defaults.set(showRecentTabSwitcher, forKey: Keys.showRecentTabSwitcher) }
+    }
+
     var showNewProjectButton: Bool {
         didSet { defaults.set(showNewProjectButton, forKey: Keys.showNewProjectButton) }
     }
@@ -374,6 +379,17 @@ final class Preferences {
         let fresh = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         defaults.set(fresh, forKey: Keys.installationID)
         return fresh
+    }
+
+    /// Whether the first-run seed (`FirstRunSeed`) has already had its say.
+    /// Set on the first launch that can answer the question — whether or not
+    /// it actually seeded — so an existing install is never examined twice
+    /// and a user who removes every project doesn't get a Home project back.
+    /// Like `installationID`: nothing in the UI reads it, so it's a
+    /// read-through rather than `@Observable` state.
+    var hasSeededFirstRun: Bool {
+        get { defaults.bool(forKey: Keys.hasSeededFirstRun) }
+        set { defaults.set(newValue, forKey: Keys.hasSeededFirstRun) }
     }
 
     /// Slide the hidden sidebar out while the pointer sits at the window's
@@ -807,6 +823,7 @@ final class Preferences {
         showTabStatusIndicator = defaults.object(forKey: Keys.showTabStatusIndicator) as? Bool ?? false
         showSpinnerOverAgentIcons = defaults.object(forKey: Keys.showSpinnerOverAgentIcons) as? Bool ?? true
         autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
+        showRecentTabSwitcher = defaults.object(forKey: Keys.showRecentTabSwitcher) as? Bool ?? false
         showNewProjectButton = defaults.object(forKey: Keys.showNewProjectButton) as? Bool ?? true
         backgroundSSHConnections = defaults.object(forKey: Keys.backgroundSSHConnections) as? Bool ?? true
         reconnectRemotePanes = defaults.object(forKey: Keys.reconnectRemotePanes) as? Bool ?? true
@@ -937,10 +954,12 @@ final class Preferences {
         static let showTabStatusIndicator = "macterm.sidebar.showTabStatusIndicator"
         static let showSpinnerOverAgentIcons = "macterm.sidebar.showSpinnerOverAgentIcons"
         static let autoNameTabs = "macterm.tabs.autoName"
+        static let showRecentTabSwitcher = "macterm.tabs.showRecentTabSwitcher"
         static let showNewProjectButton = "macterm.sidebar.showNewProjectButton"
         static let backgroundSSHConnections = "macterm.remote.backgroundSSHConnections"
         static let reconnectRemotePanes = "macterm.remote.reconnectDroppedPanes"
         static let installationID = "macterm.installationID"
+        static let hasSeededFirstRun = "macterm.firstRun.seeded"
         static let peekSidebarWhenHidden = "macterm.sidebar.peekWhenHidden"
         static let sidebarWidth = "macterm.sidebar.width"
         static let updateChannel = "macterm.updates.channel"

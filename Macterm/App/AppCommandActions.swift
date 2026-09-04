@@ -9,11 +9,28 @@ struct AppCommandContext {
 }
 
 extension AppCommand {
-    /// Returns the closure that performs this command, or nil if the command
-    /// doesn't apply in the current context (e.g. tab/pane commands when no
-    /// project is active, "Replace path" when the pane's pwd matches the
-    /// project's). Single source of truth for execution — used by both the
-    /// command palette and the menu bar so the two stay in sync.
+    /// Menu key equivalents are handled before KeyRouter's local monitor.
+    /// Recent Tab must begin its hold interaction here when its shortcut fired;
+    /// pointer and menu-navigation invocations stay one-shot.
+    @MainActor
+    func performMenuAction(in ctx: AppCommandContext, event: NSEvent?) {
+        guard self == .recentTab,
+              let event,
+              HotkeyRegistry.matches(event, action: .recentTab),
+              let projectID = ctx.appState.activeProjectID
+        else {
+            action(in: ctx)?()
+            return
+        }
+        ctx.appState.cycleRecentTab(projectID: projectID)
+        if HotkeyRegistry.selectedShortcut(for: .recentTab)?.modifiers.isEmpty == true {
+            ctx.appState.commitRecentTabCycle()
+        }
+    }
+
+    /// Returns the command's one-shot action, or nil when it doesn't apply in
+    /// the current context. The palette and pointer-driven menu use this path;
+    /// `performMenuAction` adds the keyboard lifecycle needed by Recent Tab.
     @MainActor
     func action(in ctx: AppCommandContext) -> (@MainActor () -> Void)? {
         let projectID = ctx.appState.activeProjectID
@@ -54,7 +71,12 @@ extension AppCommand {
             return { ctx.appState.selectPreviousTab(projectID: projectID) }
         case .recentTab:
             guard let projectID else { return nil }
-            return { ctx.appState.cycleRecentTab(projectID: projectID) }
+            // Menu and palette actions have no modifier release, so they
+            // perform one complete cycle.
+            return {
+                ctx.appState.cycleRecentTab(projectID: projectID)
+                ctx.appState.commitRecentTabCycle()
+            }
         case .renameTab:
             guard let projectID,
                   let tab = ctx.appState.workspaces[projectID]?.activeTab

@@ -88,6 +88,7 @@ final class ControlHandler {
         case "session.kill": return try await sessionKill(args)
         case "layout.apply": return try layoutApply(args)
         case "layout.save": return try layoutSave(args)
+        case "tutor.render": return try tutorRender(args)
         default:
             throw ControlError(
                 code: .unknownCommand,
@@ -102,11 +103,44 @@ final class ControlHandler {
     private func status() -> ControlData {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         let active = projectStore.projects.first { $0.id == appState.activeProjectID }
+        #if DEBUG
+        let recentTabSwitcherVisible: Bool? = appState.isRecentTabSwitcherPresented
+        let recentTabSelectedTabID = appState.recentTabCycle?.selectedTabID.uuidString
+        #else
+        let recentTabSwitcherVisible: Bool? = BenchmarkControl.isEnabled
+            ? appState.isRecentTabSwitcherPresented
+            : nil
+        let recentTabSelectedTabID: String? = BenchmarkControl.isEnabled
+            ? appState.recentTabCycle?.selectedTabID.uuidString
+            : nil
+        #endif
         return ControlData(status: ControlStatusInfo(
             version: version,
             pid: getpid(),
             activeProject: active?.name,
-            activeProjectID: active?.id.uuidString
+            activeProjectID: active?.id.uuidString,
+            recentTabSwitcherVisible: recentTabSwitcherVisible,
+            recentTabSelectedTabID: recentTabSelectedTabID,
+            recentTabPreviewMetrics: BenchmarkControl.isEnabled
+                ? BenchmarkControl.recentTabPreviewMetrics
+                : nil
+        ))
+    }
+
+    /// Render a tutorial topic (`macterm tutor`). App-side because the text
+    /// carries the user's LIVE keybindings — see `Tutorial`.
+    private func tutorRender(_ args: ControlArgs) throws -> ControlData {
+        let raw = args.topic ?? Tutorial.Topic.project.rawValue
+        guard let topic = Tutorial.Topic(rawValue: raw) else {
+            throw ControlError(
+                code: .badRequest,
+                message: "unknown tutorial topic \"\(raw)\"",
+                action: "known topics: " + Tutorial.Topic.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
+        return ControlData(tutorial: ControlTutorial(
+            topic: topic.rawValue,
+            text: Tutorial.render(topic: topic, styled: args.styled ?? false)
         ))
     }
 
