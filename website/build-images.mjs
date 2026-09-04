@@ -33,10 +33,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = join(here, "public", "assets");
 const OUT_DIR = join(here, "public", "img");
 
-// The hero is capped at 1000 CSS px by the landing page's `max-width:1000px`
-// figure, so 2000 covers it at 2x DPR — which every Mac this site is aimed at
-// has. The smaller widths serve the phone and tablet breakpoints.
-const WIDTHS = [640, 1000, 1400, 2000];
+// The hero is capped at 1100 CSS px by the landing page's `max-width: 1180px`
+// figure minus 40px padding on each side, so 2200 covers it at 2x DPR — which
+// every Mac this site is aimed at has. The smaller widths serve the phone and
+// tablet breakpoints.
+const WIDTHS = [640, 1000, 1400, 2200];
 // The width the <picture> fallback <img> is emitted at. Only reached by a
 // client with no WebP support, so it trades bytes for compatibility.
 const FALLBACK_WIDTH = 1400;

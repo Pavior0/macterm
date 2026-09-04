@@ -70,7 +70,7 @@
 
   // The rungs build-images.mjs emits. Kept in step with WIDTHS there — a rung
   // named here that the build didn't write is a 404 on click.
-  const WIDTHS = [640, 1000, 1400, 2000];
+  const WIDTHS = [640, 1000, 1400, 2200];
   const srcsetFor = (base) =>
     WIDTHS.map((w) => `/img/${base}-${w}.webp ${w}w`).join(", ");
 
