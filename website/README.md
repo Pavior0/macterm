@@ -60,7 +60,7 @@ button follows on its own.
 `assets/` holds the originals the README and release notes use — 3132×1780
 screenshots at ~2MB each. The pages never reference those directly:
 `build-images.mjs` renders them into `public/img/` as a responsive WebP
-`srcset` (640/1000/1400/2200w) plus a 1400w PNG fallback, and the landing page
+`srcset` (640/1000/1400/2200/3132w) plus a 1400w PNG fallback, and the landing page
 picks a rung with `<picture>`. The hero went from a 2.5MB PNG to 53KB at 1×
 and 142KB at 2×, which is the difference between failing and passing Largest
 Contentful Paint.
