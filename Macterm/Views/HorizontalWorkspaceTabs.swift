@@ -46,6 +46,9 @@ struct HorizontalWorkspaceTabs: View {
                             hoverSuppressed: draggedTabID != nil || isContextMenuTracking,
                             onSelect: {
                                 appState.selectTab(tab.id, projectID: workspace.projectID)
+                            },
+                            onClose: {
+                                appState.requestCloseTab(tab.id, projectID: workspace.projectID)
                             }
                         )
                         .id(tab.id)
@@ -260,7 +263,8 @@ struct HorizontalWorkspaceTabs: View {
                 hoverSuppressed: true,
                 hoverEnabled: false,
                 fixedSize: dragSourceSize,
-                onSelect: {}
+                onSelect: {},
+                onClose: {}
             )
             .allowsHitTesting(false)
             .offset(

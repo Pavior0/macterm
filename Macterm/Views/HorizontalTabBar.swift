@@ -10,6 +10,8 @@ struct HorizontalTabBar: View {
     @State
     private var isProjectSwitcherPresented = false
     @State
+    private var isProjectSwitcherHovering = false
+    @State
     private var isNewTabHovering = false
 
     private var activeProject: Project? {
@@ -40,9 +42,15 @@ struct HorizontalTabBar: View {
                 }
                 .padding(.horizontal, 8)
                 .frame(height: 28)
+                .horizontalNavigationStateSurface(
+                    isHovering: isProjectSwitcherHovering,
+                    isSelected: isProjectSwitcherPresented,
+                    cornerRadius: 7
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onHover { isProjectSwitcherHovering = $0 }
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
             .help("Switch project")

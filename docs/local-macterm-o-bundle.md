@@ -9,7 +9,7 @@ Macterm Dev applications as `Macterm O`.
 - Bundle ID: `com.thdxg.macterm.o`
 - Display name: `Macterm O`
 - Source branch: `feat/horizontal-tabs`
-- Source commit: `c33518f26901595ede94456430d494f359a77df5`
+- Source commit: `4944eb1646083c708950d0b6874c1742aa7027fe` plus this checkout's current changes
 - Build configuration: `Release`
 - Marketing version: `0.0.0`
 - Bundle version: `0.0.0.9999`
@@ -25,6 +25,13 @@ From the repository root, after switching to the desired commit:
 ```bash
 export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
 
+mise run macterm-o-install --verbose
+```
+
+The task runs the repository's format, lint, and test checks, then performs the
+equivalent build and install steps below:
+
+```bash
 MACTERM_BUILD_DIR="$PWD/build/o" \
 MACTERM_BUILD_BUNDLE_ID="com.thdxg.macterm.o" \
 MACTERM_BUILD_DISPLAY_NAME="Macterm O" \
@@ -37,5 +44,3 @@ MACTERM_INSTALL_DESTINATION_APP="/Applications/Macterm O.app" \
 
 The build script archives the app with the Release configuration and creates a
 DMG under `build/o`; the install step replaces only `/Applications/Macterm O.app`.
-Use the repository's format, lint, and test tasks before installing when making
-source changes.

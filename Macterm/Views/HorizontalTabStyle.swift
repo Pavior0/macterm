@@ -35,22 +35,17 @@ extension View {
         }
     }
 
-    /// Active tabs are a native Liquid Glass control layer on Tahoe. Older
-    /// systems keep the same capsule geometry with the nearest system material.
+    /// Keep the active tab on native Liquid Glass while clipping the effect to
+    /// its capsule. macOS 27 lets title-bar accessories draw outside their
+    /// bounds; the explicit clip prevents glass depth from becoming a halo.
     @ViewBuilder
     func horizontalActiveTabMaterial(isActive: Bool) -> some View {
         if isActive {
             if #available(macOS 26.0, *) {
-                // Tab labels carry text, so use regular glass rather than the
-                // highly translucent clear variant. Regular glass adapts the
-                // backdrop's luminosity to preserve legibility.
                 glassEffect(.regular, in: .capsule)
+                    .clipShape(Capsule(style: .continuous))
             } else {
                 background(.regularMaterial, in: Capsule(style: .continuous))
-                overlay {
-                    Capsule(style: .continuous)
-                        .strokeBorder(.primary.opacity(0.10), lineWidth: 0.5)
-                }
             }
         } else {
             self

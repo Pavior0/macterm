@@ -13,7 +13,7 @@ struct HorizontalProjectSwitcher: View {
     @State
     private var query = ""
     @State
-    private var isNewProjectHovered = false
+    private var isNewProjectHovering = false
     @FocusState
     private var searchIsFocused: Bool
 
@@ -41,14 +41,22 @@ struct HorizontalProjectSwitcher: View {
             ScrollView {
                 LazyVStack(spacing: 2) {
                     if !appState.pinnedRecords.isEmpty, matchesPinnedProject {
-                        projectButton(PinnedTabs.project) {
+                        HorizontalProjectSwitcherRow(
+                            project: PinnedTabs.project,
+                            isSelected: appState.activeProjectID == PinnedTabs.projectID
+                        ) {
                             appState.selectPinnedProject()
+                            isPresented = false
                         }
                     }
 
                     ForEach(filteredProjects) { project in
-                        projectButton(project) {
+                        HorizontalProjectSwitcherRow(
+                            project: project,
+                            isSelected: appState.activeProjectID == project.id
+                        ) {
                             appState.selectProject(project)
+                            isPresented = false
                         }
                     }
 
@@ -81,34 +89,34 @@ struct HorizontalProjectSwitcher: View {
                 .foregroundStyle(.primary)
                 .padding(.horizontal, 10)
                 .frame(height: 30, alignment: .leading)
-                .horizontalProjectMenuHoverMaterial(isHovering: isNewProjectHovered)
+                .horizontalNavigationStateSurface(isHovering: isNewProjectHovering)
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            // The system default Menu style becomes a large glass capsule on
-            // macOS 27. Keep this footer quiet and let its hover state provide
-            // the only transient surface.
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .onHover { isNewProjectHovered = $0 }
-            .animation(.easeOut(duration: 0.12), value: isNewProjectHovered)
+            .onHover { isNewProjectHovering = $0 }
         }
         .padding(10)
         .frame(width: 320)
-        // The panel window already provides the floating separation. Avoid a
-        // second Liquid Glass edge here; it reads as a dark halo around the
-        // project list instead of a clean popover boundary.
-        .horizontalPopoverSurface(showsGlassEdge: false)
+        .horizontalPopoverSurface()
         .onAppear { searchIsFocused = true }
     }
 
     private var matchesPinnedProject: Bool {
         query.isEmpty || PinnedTabs.project.name.localizedStandardContains(query)
     }
+}
 
-    private func projectButton(_ project: Project, action: @escaping () -> Void) -> some View {
+private struct HorizontalProjectSwitcherRow: View {
+    let project: Project
+    let isSelected: Bool
+    let action: () -> Void
+    @State
+    private var isHovering = false
+
+    var body: some View {
         Button {
             action()
-            isPresented = false
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: project.id == PinnedTabs.projectID ? "pin" : (project.isRemote ? "network" : "folder"))
@@ -126,37 +134,17 @@ struct HorizontalProjectSwitcher: View {
                     }
                 }
                 Spacer(minLength: 8)
-                if appState.activeProjectID == project.id {
+                if isSelected {
                     Image(systemName: "checkmark")
                         .foregroundStyle(MactermTheme.accent)
                 }
             }
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-            .contentShape(Rectangle())
+            .horizontalNavigationStateSurface(isHovering: isHovering, isSelected: isSelected)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-    }
-}
-
-private extension View {
-    /// Keep the footer quiet until the pointer reaches it. On macOS 26 and
-    /// later, regular Liquid Glass supplies the adaptive edge and contrast;
-    /// older systems get the nearest local-material treatment instead.
-    @ViewBuilder
-    func horizontalProjectMenuHoverMaterial(isHovering: Bool) -> some View {
-        if isHovering {
-            if #available(macOS 26.0, *) {
-                glassEffect(.regular, in: .rect(cornerRadius: 8))
-            } else {
-                background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(.primary.opacity(0.12), lineWidth: 0.5)
-                    }
-            }
-        } else {
-            self
-        }
+        .onHover { isHovering = $0 }
     }
 }

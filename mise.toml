@@ -112,6 +112,28 @@ run = """
   fi
 """
 
+[tasks.macterm-o-install]
+description = "Build and install the local Macterm O release app"
+depends = ["format", "lint", "test"]
+usage = 'flag "-v --verbose" help="Stream raw output instead of the spinner"'
+run = """
+  source scripts/_lib.sh
+  install_macterm_o_release_build() {
+    MACTERM_BUILD_DIR="$PWD/build/o" \
+    MACTERM_BUILD_BUNDLE_ID="com.thdxg.macterm.o" \
+    MACTERM_BUILD_DISPLAY_NAME="Macterm O" \
+      ./scripts/build.sh
+    MACTERM_INSTALL_SOURCE_APP="$PWD/build/o/export/Macterm.app" \
+    MACTERM_INSTALL_DESTINATION_APP="/Applications/Macterm O.app" \
+      ./scripts/install.sh
+  }
+  if [[ "$usage_verbose" == "true" ]]; then
+    install_macterm_o_release_build
+  else
+    run_step "Building and installing Macterm O..." install_macterm_o_release_build
+  fi
+"""
+
 [tasks.setup]
 description = "Download GhosttyKit framework and resources"
 usage = 'flag "-v --verbose" help="Stream raw output instead of the spinner"'

@@ -9,6 +9,8 @@ struct HorizontalWorkspaceTab: View {
     private var isHoverCardPresented = false
     @State
     private var hoverPresentationTask: Task<Void, Never>?
+    @State
+    private var isCloseButtonHovering = false
     let tab: TerminalTab
     let index: Int
     let projectDirectory: String?
@@ -17,6 +19,7 @@ struct HorizontalWorkspaceTab: View {
     var hoverEnabled = true
     var fixedSize: CGSize?
     let onSelect: () -> Void
+    let onClose: () -> Void
 
     private var panes: [Pane] { tab.splitRoot.allPanes() }
     private var tabMaximumWidth: CGFloat {
@@ -25,55 +28,91 @@ struct HorizontalWorkspaceTab: View {
     }
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 6) {
-                HorizontalTabIcon(tab: tab, index: index + 1)
+        ZStack(alignment: .trailing) {
+            Button(action: onSelect) {
+                HStack(spacing: 6) {
+                    HorizontalTabIcon(tab: tab, index: index + 1)
 
-                if tab.customTitle == nil, panes.count > 1 {
-                    HStack(spacing: 7) {
-                        ForEach(Array(panes.enumerated()), id: \.element.id) { paneIndex, pane in
-                            if paneIndex > 0 {
-                                Divider()
-                                    .frame(height: 14)
+                    if tab.customTitle == nil, panes.count > 1 {
+                        HStack(spacing: 7) {
+                            ForEach(Array(panes.enumerated()), id: \.element.id) { paneIndex, pane in
+                                if paneIndex > 0 {
+                                    Divider()
+                                        .frame(height: 14)
+                                }
+                                HorizontalPaneTitleSegment(
+                                    pane: pane,
+                                    projectDirectory: projectDirectory,
+                                    isActive: isActive
+                                )
                             }
-                            HorizontalPaneTitleSegment(
-                                pane: pane,
-                                projectDirectory: projectDirectory,
-                                isActive: isActive
+                        }
+                    } else {
+                        Text(tab.sidebarRowTitle(projectDirectory: projectDirectory))
+                            .font(.system(size: 12, weight: isActive ? .medium : .regular))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if panes.count > 1 {
+                            HorizontalSplitLayoutGlyph(
+                                splitRoot: tab.splitRoot,
+                                focusedPaneID: tab.focusedPaneID
                             )
                         }
                     }
-                } else {
-                    Text(tab.sidebarRowTitle(projectDirectory: projectDirectory))
-                        .font(.system(size: 12, weight: isActive ? .medium : .regular))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                }
+                .foregroundStyle(isActive ? .primary : .secondary)
+                .padding(.leading, isActive ? 16 : 9)
+                // Reserve the close button's slot while it is hidden so hover
+                // never changes the tab width or shifts its title.
+                .padding(.trailing, 28)
+                .horizontalTabSize(
+                    fixedSize: fixedSize,
+                    minimumWidth: isActive ? 94 : 78,
+                    maximumWidth: tabMaximumWidth
+                )
+                .background {
+                    if !isActive, isHovering {
+                        Capsule(style: .continuous)
+                            .fill(Color.primary.opacity(0.10))
+                    }
+                }
+                .horizontalActiveTabMaterial(isActive: isActive)
+                .contentShape(Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
 
-                    if panes.count > 1 {
-                        HorizontalSplitLayoutGlyph(
-                            splitRoot: tab.splitRoot,
-                            focusedPaneID: tab.focusedPaneID
-                        )
+            if isHovering {
+                Button {
+                    hoverPresentationTask?.cancel()
+                    isHoverCardPresented = false
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .semibold))
+                        .frame(width: 18, height: 18)
+                        .background {
+                            if isCloseButtonHovering {
+                                Circle()
+                                    .fill(Color.primary.opacity(0.10))
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .contentShape(Circle())
+                .padding(.trailing, 5)
+                .help("Close Tab")
+                .accessibilityLabel("Close Tab")
+                .onHover { hovering in
+                    isCloseButtonHovering = hovering
+                    if hovering {
+                        hoverPresentationTask?.cancel()
+                        isHoverCardPresented = false
                     }
                 }
             }
-            .foregroundStyle(isActive ? .primary : .secondary)
-            .padding(.horizontal, isActive ? 16 : 9)
-            .horizontalTabSize(
-                fixedSize: fixedSize,
-                minimumWidth: isActive ? 94 : 78,
-                maximumWidth: tabMaximumWidth
-            )
-            .background {
-                if !isActive, isHovering {
-                    Capsule(style: .continuous)
-                        .fill(Color.primary.opacity(0.10))
-                }
-            }
-            .horizontalActiveTabMaterial(isActive: isActive)
-            .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(.plain)
         .onHover { hovering in
             updateHover(hovering)
         }
