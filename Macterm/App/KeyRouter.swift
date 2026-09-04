@@ -27,6 +27,7 @@ final class KeyRouter {
     private var responders: [KeyResponder] = []
     private var keyMonitor: Any?
     private var flagsMonitor: Any?
+    private var appResignObserver: Any?
     private var flagsHandlers: [(NSEvent) -> Void] = []
 
     /// Start intercepting key events. Safe to call more than once — only the
@@ -37,8 +38,18 @@ final class KeyRouter {
             self?.dispatch(event) == true ? nil : event
         }
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            ModifierKeyState.shared.updateModifierFlags(event.modifierFlags)
             self?.flagsHandlers.forEach { $0(event) }
             return event
+        }
+        appResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                ModifierKeyState.shared.resetModifierFlags()
+            }
         }
     }
 

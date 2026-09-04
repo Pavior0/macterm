@@ -6,6 +6,8 @@ import SwiftUI
 struct HorizontalWorkspaceTabs: View {
     private static let coordinateSpace = "horizontal-workspace-tab-strip"
 
+    private var modifierKeyState: ModifierKeyState { .shared }
+
     @Environment(AppState.self)
     private var appState
     @Environment(ProjectStore.self)
@@ -43,6 +45,7 @@ struct HorizontalWorkspaceTabs: View {
                             index: index,
                             projectDirectory: project?.id == PinnedTabs.projectID ? nil : project?.path,
                             isActive: tab.id == workspace.activeTabID,
+                            showsTabIndexHint: modifierKeyState.isCommandPressed,
                             hoverSuppressed: draggedTabID != nil || isContextMenuTracking,
                             onSelect: {
                                 appState.selectTab(tab.id, projectID: workspace.projectID)
@@ -260,6 +263,7 @@ struct HorizontalWorkspaceTabs: View {
                 index: index,
                 projectDirectory: project?.id == PinnedTabs.projectID ? nil : project?.path,
                 isActive: draggedTab.id == workspace.activeTabID,
+                showsTabIndexHint: modifierKeyState.isCommandPressed,
                 hoverSuppressed: true,
                 hoverEnabled: false,
                 fixedSize: dragSourceSize,

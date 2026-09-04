@@ -3,6 +3,8 @@ import SwiftUI
 
 /// One title-bar tab showing its live icon and actual pane composition.
 struct HorizontalWorkspaceTab: View {
+    @Environment(\.accessibilityReduceMotion)
+    private var reduceMotion
     @State
     private var isHovering = false
     @State
@@ -15,6 +17,7 @@ struct HorizontalWorkspaceTab: View {
     let index: Int
     let projectDirectory: String?
     let isActive: Bool
+    let showsTabIndexHint: Bool
     var hoverSuppressed = false
     var hoverEnabled = true
     var fixedSize: CGSize?
@@ -22,6 +25,11 @@ struct HorizontalWorkspaceTab: View {
     let onClose: () -> Void
 
     private var panes: [Pane] { tab.splitRoot.allPanes() }
+    private var tabIndexNumber: Int { index + 1 }
+    private var trailingAccessoryPadding: CGFloat {
+        max(28, CGFloat(String(tabIndexNumber).count * 6 + 15))
+    }
+
     private var tabMaximumWidth: CGFloat {
         guard tab.customTitle == nil, panes.count > 1 else { return 220 }
         return min(CGFloat(panes.count) * 112 + 32, 380)
@@ -63,9 +71,10 @@ struct HorizontalWorkspaceTab: View {
                 }
                 .foregroundStyle(isActive ? .primary : .secondary)
                 .padding(.leading, isActive ? 16 : 9)
-                // Reserve the close button's slot while it is hidden so hover
-                // never changes the tab width or shifts its title.
-                .padding(.trailing, 28)
+                // Reserve the widest trailing accessory even while it is
+                // hidden, so Command hints and hover never cover or shift the
+                // title. The normal 28pt slot also fits two-digit indices.
+                .padding(.trailing, trailingAccessoryPadding)
                 .horizontalTabSize(
                     fixedSize: fixedSize,
                     minimumWidth: isActive ? 94 : 78,
@@ -82,7 +91,21 @@ struct HorizontalWorkspaceTab: View {
             }
             .buttonStyle(.plain)
 
-            if isHovering {
+            if showsTabIndexHint {
+                HorizontalTabIndexShortcutHint(number: tabIndexNumber, isActive: isActive)
+                    .padding(.trailing, 5)
+                    .transition(
+                        reduceMotion
+                            ? .identity
+                            : .asymmetric(
+                                insertion: .opacity.combined(
+                                    with: .scale(scale: 0.92, anchor: .trailing)
+                                ),
+                                removal: .opacity
+                            )
+                    )
+                    .allowsHitTesting(false)
+            } else if isHovering {
                 Button {
                     hoverPresentationTask?.cancel()
                     isHoverCardPresented = false
@@ -111,8 +134,12 @@ struct HorizontalWorkspaceTab: View {
                         isHoverCardPresented = false
                     }
                 }
+                .transition(.identity)
             }
         }
+        // Command is a high-frequency keyboard gesture: keep the requested
+        // materialization nearly instant and avoid spring/bounce latency.
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.10), value: showsTabIndexHint)
         .onHover { hovering in
             updateHover(hovering)
         }
@@ -146,6 +173,36 @@ struct HorizontalWorkspaceTab: View {
             guard !Task.isCancelled, isHovering, !hoverSuppressed else { return }
             isHoverCardPresented = true
         }
+    }
+}
+
+/// A compact keycap-like material that reveals a tab's Cmd+number shortcut.
+private struct HorizontalTabIndexShortcutHint: View {
+    let number: Int
+    let isActive: Bool
+
+    var body: some View {
+        Text(number, format: .number.grouping(.never))
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(isActive ? .primary : .secondary)
+            .padding(.horizontal, 5)
+            .frame(minWidth: 18)
+            .frame(height: 18)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(
+                        isActive
+                            ? Color.primary.opacity(0.13)
+                            : Color(nsColor: .windowBackgroundColor).opacity(0.72)
+                    )
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.primary.opacity(isActive ? 0.16 : 0.10), lineWidth: 0.5)
+                    }
+            }
+            .shadow(color: .black.opacity(0.08), radius: 1, y: 0.5)
+            .accessibilityHidden(true)
     }
 }
 
