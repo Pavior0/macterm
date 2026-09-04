@@ -43,6 +43,9 @@ final class AppState {
     var activeProjectID: UUID? {
         didSet {
             Preferences.shared.activeProjectID = activeProjectID
+            if recentTabCycle?.projectID != activeProjectID {
+                cancelRecentTabCycle()
+            }
             // Becoming active IS the reload — `warmFocusedProject` only ever
             // spawns the focused project's shells — so this is the one choke
             // point every load path passes through, whether it went via
@@ -253,10 +256,10 @@ final class AppState {
     /// command and the sidebar's New Project menu, consumed by `MainWindow`.
     var isNewRemoteProjectSheetPresented = false
 
-    // Tab cycling state (Ctrl+Tab)
-    private var tabCycleOrder: [UUID] = []
-    private var tabCycleIndex: Int = 0
-    var isTabCycling: Bool { !tabCycleOrder.isEmpty }
+    /// The current Recent Tab interaction, read by the switcher overlay.
+    private(set) var recentTabCycle: RecentTabCycle?
+    var isTabCycling: Bool { recentTabCycle != nil }
+    var isRecentTabSwitcherPresented: Bool { recentTabCycle?.showsSwitcher == true }
 
     private let workspaceStore: WorkspaceStore
 
@@ -1572,26 +1575,86 @@ final class AppState {
     }
 
     func cycleRecentTab(projectID: UUID) {
-        guard let ws = workspaces[projectID] else { return }
-        if tabCycleOrder.isEmpty {
-            tabCycleOrder = ws.recencyOrder()
-            tabCycleIndex = 0
-        }
-        guard tabCycleOrder.count > 1 else { return }
-        tabCycleIndex = (tabCycleIndex + 1) % tabCycleOrder.count
-        ws.peekTab(tabCycleOrder[tabCycleIndex])
+        cycleRecentTab(projectID: projectID, showsSwitcher: Preferences.shared.showRecentTabSwitcher)
     }
 
-    func commitTabCycle(projectID: UUID) {
-        guard !tabCycleOrder.isEmpty, let ws = workspaces[projectID] else {
-            tabCycleOrder = []
+    #if DEBUG
+    /// Forces the visual path without mutating the user's preference.
+    func cycleRecentTabForAutomation(projectID: UUID) {
+        cycleRecentTab(projectID: projectID, showsSwitcher: true)
+    }
+    #endif
+
+    private func cycleRecentTab(projectID: UUID, showsSwitcher: Bool) {
+        guard let workspace = workspaces[projectID] else { return }
+        if let cycle = recentTabCycle, cycle.projectID != projectID {
+            cancelRecentTabCycle()
+        }
+        if recentTabCycle == nil {
+            let tabIDs = workspace.recencyOrder()
+            guard tabIDs.count > 1, let originalTabID = workspace.activeTabID else { return }
+            recentTabCycle = RecentTabCycle(
+                projectID: projectID,
+                tabIDs: tabIDs,
+                originalTabID: originalTabID,
+                showsSwitcher: showsSwitcher,
+                selectedIndex: 0
+            )
+        }
+        guard var cycle = recentTabCycle else { return }
+        cycle.selectedIndex = (cycle.selectedIndex + 1) % cycle.tabIDs.count
+        recentTabCycle = cycle
+        if !cycle.showsSwitcher {
+            workspace.peekTab(cycle.selectedTabID)
+        }
+    }
+
+    /// Move the switcher's highlight without changing the live terminal.
+    func highlightRecentTab(_ tabID: UUID) {
+        guard var cycle = recentTabCycle,
+              cycle.showsSwitcher,
+              let workspace = workspaces[cycle.projectID],
+              workspace.tabs.contains(where: { $0.id == tabID }),
+              let index = cycle.tabIDs.firstIndex(of: tabID)
+        else { return }
+        cycle.selectedIndex = index
+        recentTabCycle = cycle
+    }
+
+    /// Commit the row clicked in the switcher. A stale row never commits a
+    /// different highlight if its tab disappeared between rendering and click.
+    func commitRecentTabCycle(selecting tabID: UUID) {
+        highlightRecentTab(tabID)
+        guard recentTabCycle?.selectedTabID == tabID else { return }
+        commitRecentTabCycle()
+    }
+
+    /// Commit the highlighted target when the shortcut modifier is released.
+    func commitRecentTabCycle() {
+        guard let cycle = recentTabCycle,
+              let workspace = workspaces[cycle.projectID],
+              workspace.tabs.contains(where: { $0.id == cycle.selectedTabID })
+        else {
+            cancelRecentTabCycle()
             return
         }
-        let selectedID = tabCycleOrder[tabCycleIndex]
-        tabCycleOrder = []
-        tabCycleIndex = 0
-        ws.selectTab(selectedID)
+        recentTabCycle = nil
+        // Direct mode already previewed the target. Restore the original first
+        // so selecting the target records the correct MRU order.
+        if !cycle.showsSwitcher {
+            workspace.peekTab(cycle.originalTabID)
+        }
+        workspace.selectTab(cycle.selectedTabID)
         saveWorkspaces()
+    }
+
+    /// Cancel the interaction and restore the tab that was active at its start.
+    func cancelRecentTabCycle() {
+        guard let cycle = recentTabCycle else { return }
+        recentTabCycle = nil
+        if !cycle.showsSwitcher {
+            workspaces[cycle.projectID]?.peekTab(cycle.originalTabID)
+        }
     }
 
     enum GlobalTabDirection { case next, previous }

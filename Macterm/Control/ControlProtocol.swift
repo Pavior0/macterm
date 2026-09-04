@@ -256,6 +256,11 @@ struct ControlStatusInfo: Codable, Equatable {
     var pid: Int32
     var activeProject: String?
     var activeProjectID: String?
+    #if DEBUG
+    /// Recent Tab state used by UI automation for deadline polling.
+    var recentTabSwitcherVisible: Bool?
+    var recentTabSelectedTabID: String?
+    #endif
 }
 
 struct ControlProjectInfo: Codable, Equatable {

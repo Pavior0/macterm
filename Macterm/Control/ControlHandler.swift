@@ -103,12 +103,23 @@ final class ControlHandler {
     private func status() -> ControlData {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         let active = projectStore.projects.first { $0.id == appState.activeProjectID }
+        #if DEBUG
+        return ControlData(status: ControlStatusInfo(
+            version: version,
+            pid: getpid(),
+            activeProject: active?.name,
+            activeProjectID: active?.id.uuidString,
+            recentTabSwitcherVisible: appState.isRecentTabSwitcherPresented,
+            recentTabSelectedTabID: appState.recentTabCycle?.selectedTabID.uuidString
+        ))
+        #else
         return ControlData(status: ControlStatusInfo(
             version: version,
             pid: getpid(),
             activeProject: active?.name,
             activeProjectID: active?.id.uuidString
         ))
+        #endif
     }
 
     /// Render a tutorial topic (`macterm tutor`). App-side because the text

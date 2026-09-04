@@ -1052,6 +1052,7 @@ private struct AppearanceSettings: View {
     @State private var showTabStatusIndicator: Bool = Preferences.shared.showTabStatusIndicator
     @State private var showSpinnerOverAgentIcons: Bool = Preferences.shared.showSpinnerOverAgentIcons
     @State private var autoNameTabs: Bool = Preferences.shared.autoNameTabs
+    @State private var showRecentTabSwitcher: Bool = Preferences.shared.showRecentTabSwitcher
     @State private var peekSidebarWhenHidden: Bool = Preferences.shared.peekSidebarWhenHidden
     @State private var showNewProjectButton: Bool = Preferences.shared.showNewProjectButton
     @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
@@ -1174,6 +1175,13 @@ private struct AppearanceSettings: View {
                         Preferences.shared.autoNameTabs = v
                     }
                 Text("Names tabs after the running program. When off, tabs show the shell or host name.")
+                    .settingsCaption()
+
+                Toggle("Show Recent Tab switcher", isOn: $showRecentTabSwitcher)
+                    .onChange(of: showRecentTabSwitcher) { _, enabled in
+                        Preferences.shared.showRecentTabSwitcher = enabled
+                    }
+                Text("Keep the shortcut modifiers held to choose a tab. Release to switch, or press Escape to cancel.")
                     .settingsCaption()
 
                 Toggle("Show AI agent icons", isOn: $showAgentIcons)

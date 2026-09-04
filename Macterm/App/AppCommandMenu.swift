@@ -1,9 +1,8 @@
+import AppKit
 import SwiftUI
 
-/// SwiftUI button for an `AppCommand` in the menu bar. Reuses
-/// `AppCommand.action(in:)` so the menu and palette can never drift apart.
-/// Disables itself when the command doesn't apply in the current context
-/// (e.g. "Next Tab" with no active project).
+/// SwiftUI button for an `AppCommand` in the menu bar. Delegates execution and
+/// enablement to `AppCommand`, keeping menu and palette behavior aligned.
 @MainActor
 struct AppCommandMenuItem: View {
     let command: AppCommand
@@ -19,7 +18,7 @@ struct AppCommandMenuItem: View {
         let action = command.action(in: ctx)
         let title = titleOverride ?? command.title
         Button(title) {
-            action?()
+            command.performMenuAction(in: ctx, event: NSApp.currentEvent)
         }
         .disabled(action == nil)
         .modifier(KeyboardShortcutForCommand(command: command))

@@ -309,6 +309,11 @@ final class Preferences {
         didSet { defaults.set(autoNameTabs, forKey: Keys.autoNameTabs) }
     }
 
+    /// Off by default to preserve the existing Ctrl+Tab behavior.
+    var showRecentTabSwitcher: Bool {
+        didSet { defaults.set(showRecentTabSwitcher, forKey: Keys.showRecentTabSwitcher) }
+    }
+
     var showNewProjectButton: Bool {
         didSet { defaults.set(showNewProjectButton, forKey: Keys.showNewProjectButton) }
     }
@@ -796,6 +801,7 @@ final class Preferences {
         showTabStatusIndicator = defaults.object(forKey: Keys.showTabStatusIndicator) as? Bool ?? false
         showSpinnerOverAgentIcons = defaults.object(forKey: Keys.showSpinnerOverAgentIcons) as? Bool ?? true
         autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
+        showRecentTabSwitcher = defaults.object(forKey: Keys.showRecentTabSwitcher) as? Bool ?? false
         showNewProjectButton = defaults.object(forKey: Keys.showNewProjectButton) as? Bool ?? true
         backgroundSSHConnections = defaults.object(forKey: Keys.backgroundSSHConnections) as? Bool ?? true
         reconnectRemotePanes = defaults.object(forKey: Keys.reconnectRemotePanes) as? Bool ?? true
@@ -925,6 +931,7 @@ final class Preferences {
         static let showTabStatusIndicator = "macterm.sidebar.showTabStatusIndicator"
         static let showSpinnerOverAgentIcons = "macterm.sidebar.showSpinnerOverAgentIcons"
         static let autoNameTabs = "macterm.tabs.autoName"
+        static let showRecentTabSwitcher = "macterm.tabs.showRecentTabSwitcher"
         static let showNewProjectButton = "macterm.sidebar.showNewProjectButton"
         static let backgroundSSHConnections = "macterm.remote.backgroundSSHConnections"
         static let reconnectRemotePanes = "macterm.remote.reconnectDroppedPanes"

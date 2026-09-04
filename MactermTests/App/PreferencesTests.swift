@@ -11,6 +11,16 @@ import Testing
 @MainActor
 struct PreferencesTests {
     @Test
+    func recent_tab_switcher_defaults_off_and_round_trips() {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+
+        #expect(!Preferences.shared.showRecentTabSwitcher)
+        Preferences.shared.showRecentTabSwitcher = true
+        #expect(Preferences.defaults.bool(forKey: Preferences.Keys.showRecentTabSwitcher))
+    }
+
+    @Test
     func sidebar_peek_style_round_trips() {
         let prior = Preferences.shared.sidebarPeekStyle
         defer { Preferences.shared.sidebarPeekStyle = prior }

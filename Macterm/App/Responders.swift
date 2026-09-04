@@ -182,6 +182,13 @@ final class MainAppResponder: KeyResponder {
             return .passThrough
         }
 
+        // While Recent Tab is active, Escape cancels it instead of reaching
+        // the terminal.
+        if appState.isTabCycling, HotkeyRegistry.eventToken(event) == "escape" {
+            appState.cancelRecentTabCycle()
+            return .handled
+        }
+
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         // Passthrough gate, ahead of every action branch: a binding the user
@@ -207,6 +214,10 @@ final class MainAppResponder: KeyResponder {
         if HotkeyRegistry.matches(event, action: .recentTab) {
             guard let projectID = appState.activeProjectID else { return .passThrough }
             appState.cycleRecentTab(projectID: projectID)
+            // A shortcut without modifiers has no release event, so finish it now.
+            if HotkeyRegistry.selectedShortcut(for: .recentTab)?.modifiers.isEmpty == true {
+                appState.commitRecentTabCycle()
+            }
             return .handled
         }
 
@@ -404,5 +415,15 @@ final class MainAppResponder: KeyResponder {
     /// on Command release.
     func endTabIndexChord() {
         tabIndexChord.reset()
+    }
+
+    func handleModifierFlagsChanged(_ modifierFlags: NSEvent.ModifierFlags) {
+        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if !flags.contains(.command) { endTabIndexChord() }
+        guard appState.isTabCycling,
+              let shortcut = HotkeyRegistry.selectedShortcut(for: .recentTab),
+              flags.intersection(shortcut.modifiers) != shortcut.modifiers
+        else { return }
+        appState.commitRecentTabCycle()
     }
 }

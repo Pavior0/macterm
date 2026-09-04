@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 @testable import Macterm
@@ -78,6 +79,233 @@ struct AppStateTests {
         state.createTab(projectID: remoteProject.id, projects: [remoteProject])
 
         #expect(remoteWorkspace.activeTab?.focusedPane?.projectPath == remoteProject.path)
+    }
+
+    @Test
+    func recent_tab_switcher_defers_selection_commits_mru_and_cancels() throws {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+        Preferences.shared.showRecentTabSwitcher = true
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let originalID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let recentID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+
+        state.cycleRecentTab(projectID: project.id)
+        #expect(state.recentTabCycle?.selectedTabID == recentID)
+        #expect(workspace.activeTabID == currentID)
+
+        state.cycleRecentTab(projectID: project.id)
+        #expect(state.recentTabCycle?.selectedTabID == originalID)
+        #expect(workspace.activeTabID == currentID)
+        state.cancelRecentTabCycle()
+        #expect(workspace.activeTabID == currentID)
+        #expect(!state.isTabCycling)
+
+        state.cycleRecentTab(projectID: project.id)
+        state.commitRecentTabCycle()
+        #expect(workspace.activeTabID == recentID)
+        #expect(workspace.recencyOrder().prefix(2).elementsEqual([recentID, currentID]))
+    }
+
+    @Test
+    func recent_tab_switcher_pointer_highlight_defers_until_click_or_release() throws {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+        Preferences.shared.showRecentTabSwitcher = true
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let oldestID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+
+        state.cycleRecentTab(projectID: project.id)
+        state.highlightRecentTab(oldestID)
+
+        #expect(state.recentTabCycle?.selectedTabID == oldestID)
+        #expect(workspace.activeTabID == currentID)
+
+        state.commitRecentTabCycle()
+        #expect(workspace.activeTabID == oldestID)
+    }
+
+    @Test
+    func recent_tab_direct_mode_previews_restores_and_commits_mru() throws {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+        Preferences.shared.showRecentTabSwitcher = false
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let recentID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+
+        state.cycleRecentTab(projectID: project.id)
+        #expect(workspace.activeTabID == recentID)
+        state.cancelRecentTabCycle()
+        #expect(workspace.activeTabID == currentID)
+
+        state.cycleRecentTab(projectID: project.id)
+        state.commitRecentTabCycle()
+        #expect(workspace.activeTabID == recentID)
+        #expect(workspace.recencyOrder().prefix(2).elementsEqual([recentID, currentID]))
+    }
+
+    @Test
+    func changing_projects_cancels_a_direct_recent_tab_preview() throws {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+        Preferences.shared.showRecentTabSwitcher = false
+
+        let state = makeAppState()
+        let firstProject = seedProject(state, name: "first")
+        let firstWorkspace = try #require(state.workspaces[firstProject.id])
+        let recentID = try #require(firstWorkspace.activeTabID)
+        state.createTab(projectID: firstProject.id, projects: [firstProject])
+        let currentID = try #require(firstWorkspace.activeTabID)
+
+        state.cycleRecentTab(projectID: firstProject.id)
+        #expect(firstWorkspace.activeTabID == recentID)
+
+        let secondProject = Project(name: "second", path: "/tmp", sortOrder: 1)
+        state.selectProject(secondProject)
+
+        #expect(!state.isTabCycling)
+        #expect(firstWorkspace.activeTabID == currentID)
+        #expect(state.activeProjectID == secondProject.id)
+    }
+
+    @Test
+    func recent_tab_commit_cancels_when_the_highlighted_tab_was_closed() throws {
+        let prior = Preferences.shared.showRecentTabSwitcher
+        defer { Preferences.shared.showRecentTabSwitcher = prior }
+        Preferences.shared.showRecentTabSwitcher = true
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let recentID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+
+        state.cycleRecentTab(projectID: project.id)
+        #expect(state.recentTabCycle?.selectedTabID == recentID)
+        state.closeTab(recentID, projectID: project.id)
+        state.commitRecentTabCycle()
+
+        #expect(workspace.activeTabID == currentID)
+        #expect(!state.isTabCycling)
+    }
+
+    @Test
+    func recent_tab_responder_cancels_on_escape_and_commits_on_modifier_release() throws {
+        let priorPreference = Preferences.shared.showRecentTabSwitcher
+        let priorShortcut = HotkeyRegistry.selectedShortcutString(for: .recentTab)
+        defer {
+            Preferences.shared.showRecentTabSwitcher = priorPreference
+            HotkeyRegistry.setShortcutString(priorShortcut, for: .recentTab)
+        }
+        Preferences.shared.showRecentTabSwitcher = true
+        HotkeyRegistry.setShortcutString("ctrl+tab", for: .recentTab)
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let recentID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-responder-projects-\(UUID().uuidString).json")
+        let responder = MainAppResponder(appState: state, projectStore: ProjectStore(fileURL: storeURL))
+        let tab = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .control,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        ))
+        let escape = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .control,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\u{1b}",
+            charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false,
+            keyCode: 53
+        ))
+
+        _ = responder.handle(tab)
+        #expect(state.recentTabCycle?.selectedTabID == recentID)
+        #expect(workspace.activeTabID == currentID)
+        _ = responder.handle(escape)
+        #expect(!state.isTabCycling)
+        #expect(workspace.activeTabID == currentID)
+
+        _ = responder.handle(tab)
+        responder.handleModifierFlagsChanged([])
+        #expect(!state.isTabCycling)
+        #expect(workspace.activeTabID == recentID)
+    }
+
+    @Test
+    func recent_tab_menu_shortcut_defers_while_menu_invocation_commits() throws {
+        let priorPreference = Preferences.shared.showRecentTabSwitcher
+        let priorShortcut = HotkeyRegistry.selectedShortcutString(for: .recentTab)
+        defer {
+            Preferences.shared.showRecentTabSwitcher = priorPreference
+            HotkeyRegistry.setShortcutString(priorShortcut, for: .recentTab)
+        }
+        Preferences.shared.showRecentTabSwitcher = true
+        HotkeyRegistry.setShortcutString("ctrl+tab", for: .recentTab)
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let recentID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-menu-projects-\(UUID().uuidString).json")
+        let context = AppCommandContext(appState: state, projectStore: ProjectStore(fileURL: storeURL))
+        let tab = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .control,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        ))
+
+        AppCommand.recentTab.performMenuAction(in: context, event: tab)
+        #expect(state.recentTabCycle?.selectedTabID == recentID)
+        #expect(workspace.activeTabID == currentID)
+        state.cancelRecentTabCycle()
+
+        AppCommand.recentTab.performMenuAction(in: context, event: nil)
+        #expect(!state.isTabCycling)
+        #expect(workspace.activeTabID == recentID)
     }
 
     // MARK: - Splits

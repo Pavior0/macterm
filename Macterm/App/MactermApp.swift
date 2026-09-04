@@ -714,18 +714,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainResponder.mainWindow = mainWindow
         mainAppResponder = mainResponder
         KeyRouter.shared.register(mainResponder)
-        // Tab-cycle commit on Ctrl-release, and Cmd+digit run end on
-        // Cmd-release (so the next digit addresses a tab rather than
-        // extending the number the last one built).
-        KeyRouter.shared.registerFlagsHandler { [weak appState, weak mainResponder] event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if !flags.contains(.command) { mainResponder?.endTabIndexChord() }
-            guard let appState, appState.isTabCycling else { return }
-            if !flags.contains(.control),
-               let projectID = appState.activeProjectID
-            {
-                appState.commitTabCycle(projectID: projectID)
-            }
+        // Recent Tab commits when a modifier in its current binding is
+        // released. Cmd+digit ends on Cmd-release so the next digit
+        // addresses a tab rather than extending the number the last one built.
+        KeyRouter.shared.registerFlagsHandler { [weak mainResponder] event in
+            mainResponder?.handleModifierFlagsChanged(event.modifierFlags)
         }
     }
 

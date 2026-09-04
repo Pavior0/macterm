@@ -52,6 +52,11 @@ enum BenchmarkControl {
         case activate
         case minimize
         case restore
+        #if DEBUG
+        case recentTabCycle = "recent-tab-cycle"
+        case recentTabCommit = "recent-tab-commit"
+        case recentTabCancel = "recent-tab-cancel"
+        #endif
     }
 
     static func install() {
@@ -115,6 +120,15 @@ enum BenchmarkControl {
             mainWindow?.deminiaturize(nil)
             NSApp.activate()
             mainWindow?.makeKeyAndOrderFront(nil)
+        #if DEBUG
+        case .recentTabCycle:
+            guard let appState, let projectID = appState.activeProjectID else { return }
+            appState.cycleRecentTabForAutomation(projectID: projectID)
+        case .recentTabCommit:
+            appState?.commitRecentTabCycle()
+        case .recentTabCancel:
+            appState?.cancelRecentTabCycle()
+        #endif
         }
     }
 
