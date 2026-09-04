@@ -104,22 +104,27 @@ final class ControlHandler {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         let active = projectStore.projects.first { $0.id == appState.activeProjectID }
         #if DEBUG
+        let recentTabSwitcherVisible: Bool? = appState.isRecentTabSwitcherPresented
+        let recentTabSelectedTabID = appState.recentTabCycle?.selectedTabID.uuidString
+        #else
+        let recentTabSwitcherVisible: Bool? = BenchmarkControl.isEnabled
+            ? appState.isRecentTabSwitcherPresented
+            : nil
+        let recentTabSelectedTabID: String? = BenchmarkControl.isEnabled
+            ? appState.recentTabCycle?.selectedTabID.uuidString
+            : nil
+        #endif
         return ControlData(status: ControlStatusInfo(
             version: version,
             pid: getpid(),
             activeProject: active?.name,
             activeProjectID: active?.id.uuidString,
-            recentTabSwitcherVisible: appState.isRecentTabSwitcherPresented,
-            recentTabSelectedTabID: appState.recentTabCycle?.selectedTabID.uuidString
+            recentTabSwitcherVisible: recentTabSwitcherVisible,
+            recentTabSelectedTabID: recentTabSelectedTabID,
+            recentTabPreviewMetrics: BenchmarkControl.isEnabled
+                ? BenchmarkControl.recentTabPreviewMetrics
+                : nil
         ))
-        #else
-        return ControlData(status: ControlStatusInfo(
-            version: version,
-            pid: getpid(),
-            activeProject: active?.name,
-            activeProjectID: active?.id.uuidString
-        ))
-        #endif
     }
 
     /// Render a tutorial topic (`macterm tutor`). App-side because the text

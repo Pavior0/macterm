@@ -1,6 +1,6 @@
 name: Benchmark
 
-# Window-state resource benchmark (scripts/benchmark.py). Pushes to main
+# Runtime resource + Recent Tab preview benchmark (scripts/benchmark.py). Pushes to main
 # publish a `benchmark-results` artifact; PR runs pool the last several main
 # runs' artifacts into a per-metric median baseline and post a comparison
 # table to the job summary.

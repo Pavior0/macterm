@@ -256,11 +256,21 @@ struct ControlStatusInfo: Codable, Equatable {
     var pid: Int32
     var activeProject: String?
     var activeProjectID: String?
-    #if DEBUG
     /// Recent Tab state used by UI automation for deadline polling.
     var recentTabSwitcherVisible: Bool?
     var recentTabSelectedTabID: String?
-    #endif
+    /// Present only in benchmark mode after a switcher preview pass completes.
+    var recentTabPreviewMetrics: ControlRecentTabPreviewMetrics?
+}
+
+struct ControlRecentTabPreviewMetrics: Codable, Equatable {
+    var generation: Int
+    var totalMilliseconds: Double
+    var maximumCaptureMilliseconds: Double
+    var paneCount: Int
+    var imageCount: Int
+    var placeholderCount: Int
+    var unavailableCount: Int
 }
 
 struct ControlProjectInfo: Codable, Equatable {

@@ -26,6 +26,8 @@ xcodebuild \
 # On top of the idle focused baseline, BENCH_WORKLOAD busy tabs (2x2 grids
 # spawned via the bundled macterm CLI) are sampled as workload-* states (
 # workload-focused, workload-unfocused); 0 skips the workload states.
+# The same run then measures three Recent Tab preview passes across five MRU
+# tabs, including the full-strip fill time and slowest per-pane capture.
 #
 # Each state is observed for BENCH_SAMPLES x BENCH_SECONDS total, split into
 # that many windows whose per-metric median is reported — the median tames a

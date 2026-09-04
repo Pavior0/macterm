@@ -244,7 +244,11 @@ class MactermHarness:
         """
         if not os.path.exists(self.cli_path):
             raise HarnessError("bundled macterm CLI missing from the app")
-        result = sh([self.cli_path, *args, "--socket", self.socket], timeout=timeout)
+        result = sh(
+            [self.cli_path, *args, "--socket", self.socket],
+            timeout=timeout,
+            env=self._cli_environment(),
+        )
         if check and result.returncode != 0:
             raise HarnessError(f"macterm {' '.join(args)} failed: {result.stderr.strip()}")
         return result
@@ -265,10 +269,17 @@ class MactermHarness:
         if not submit:
             args.append("--no-submit")
         args.append(command)
-        result = sh(args, timeout=60)
+        result = sh(args, timeout=60, env=self._cli_environment())
         if result.returncode != 0:
             raise HarnessError(f"macterm pane run failed: {result.stderr.strip()}")
         return result
+
+    def _cli_environment(self):
+        """Drop parent-shell routing hints when this harness targets explicitly."""
+        env = os.environ.copy()
+        env.pop("MACTERM_SESSION", None)
+        env.pop("MACTERM_SOCKET", None)
+        return env
 
     def panes(self, tab=None):
         args = ["pane", "list"]

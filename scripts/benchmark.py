@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Window-state resource benchmark.
+"""Runtime resource and Recent Tab preview benchmark.
 
 Measures Macterm's CPU and memory across an idle-focused sanity baseline plus
 two workload states — focused and unfocused, each with busy tabs on screen —
-by launching the app with the MACTERM_BENCHMARK=1 control hook
+plus the time to fill the five-card Recent Tab preview strip and its longest
+single-pane main-thread capture block. It launches the app with the
+MACTERM_BENCHMARK=1 control hook
 (Macterm/App/BenchmarkControl.swift) and driving it with Darwin notifications
 (`notifyutil -p`) plus LaunchServices activation (`open`). Neither needs a TCC
 grant, so this runs on a stock CI runner. (The workload states carry the real
@@ -36,7 +38,7 @@ import subprocess
 import sys
 import time
 
-from _harness import HarnessError, MactermHarness, notify, sh
+from _harness import HarnessError, MactermHarness, notify, sh, wait_for
 
 # The benchmark samples one idle state as a sanity baseline plus the two
 # workload states that carry the real signal — an app doing terminal work,
@@ -53,13 +55,16 @@ IDLE_STATES = ("focused",)
 # comparable against pre-workload history: a baseline lacking a state simply
 # shows no delta for it (first run after enabling).
 WORKLOAD_STATES = ("workload-focused", "workload-unfocused")
+INTERACTION_STATES = ("switcher-preview",)
 # Every state the run samples and the report renders, in display order.
-STATES = IDLE_STATES + WORKLOAD_STATES
+STATES = IDLE_STATES + WORKLOAD_STATES + INTERACTION_STATES
 # Runs in every workload pane: a real external child process emitting a line
 # a second — "logs trickling in" — without meaningful CPU of its own. Typed
 # into the pane's shell verbatim, so it must parse in POSIX shells AND
 # nushell; invoking /bin/sh with a quoted script does.
 WORKLOAD_COMMAND = '/bin/sh -c "while :; do date; sleep 1; done"'
+SWITCHER_TAB_COUNT = 5
+SWITCHER_TAB_COMMAND = 'printf "macterm preview benchmark\\n"'
 
 
 def parse_cputime(value):
@@ -254,6 +259,76 @@ def spawn_workload(harness, tabs):
         raise HarnessError(f"workload spawned {len(panes)} panes, expected {expected}")
 
 
+def ensure_switcher_tabs(harness, count):
+    """Create enough rendered tabs to exercise the switcher's full MRU strip."""
+    tabs = harness.cli_json("tab", "list").get("tabs") or []
+    for _ in range(max(count - len(tabs), 0)):
+        harness.cli("tab", "new", "--run", SWITCHER_TAB_COMMAND)
+        time.sleep(0.25)
+
+    tabs = harness.cli_json("tab", "list").get("tabs") or []
+    if len(tabs) < count:
+        raise HarnessError(f"switcher benchmark has {len(tabs)} tabs, expected at least {count}")
+
+
+def benchmark_switcher_preview(harness, samples):
+    """Measure the user-visible fill and longest main-thread capture block.
+
+    The app records one pass after all preview cards have resolved to either a
+    snapshot or placeholder. A generation counter makes repeated passes safe:
+    polling can never mistake the previous pass for the new notification.
+    """
+    ensure_switcher_tabs(harness, SWITCHER_TAB_COUNT)
+    runs = []
+    metadata = None
+
+    for index in range(samples):
+        before = harness.cli_json("status")["status"]
+        previous = (before.get("recentTabPreviewMetrics") or {}).get("generation", 0)
+        notify("recent-tab-cycle")
+
+        def completed_pass():
+            status = harness.cli_json("status")["status"]
+            metrics = status.get("recentTabPreviewMetrics")
+            if metrics and metrics["generation"] > previous:
+                return metrics
+            return None
+
+        metrics = wait_for(
+            completed_pass,
+            timeout=30,
+            interval=0.05,
+            message="Recent Tab preview metrics",
+        )
+        runs.append({
+            "total_ms": metrics["totalMilliseconds"],
+            "max_capture_ms": metrics["maximumCaptureMilliseconds"],
+        })
+        metadata = {
+            "tabs": SWITCHER_TAB_COUNT,
+            "panes": metrics["paneCount"],
+            "images": metrics["imageCount"],
+            "placeholders": metrics["placeholderCount"],
+            "unavailable": metrics["unavailableCount"],
+        }
+        print(f"    pass {index + 1}/{samples}: {runs[-1]} {metadata}", flush=True)
+        notify("recent-tab-cancel")
+        wait_for(
+            lambda: not harness.cli_json("status")["status"].get("recentTabSwitcherVisible"),
+            timeout=10,
+            interval=0.05,
+            message="Recent Tab switcher to close",
+        )
+
+    return {
+        "metrics": {
+            "total_ms": _median_or_none([run["total_ms"] for run in runs]),
+            "max_capture_ms": _median_or_none([run["max_capture_ms"] for run in runs]),
+        },
+        "metadata": metadata,
+    }
+
+
 def git_sha():
     sha = os.environ.get("GITHUB_SHA")
     if sha:
@@ -303,6 +378,14 @@ def cmd_run(args):
                     print(f"sampling {state}: {args.samples}x{args.seconds}s", flush=True)
                     results[state] = sample_state(harness, args.seconds, args.samples)
                     print(f"  {results[state]}", flush=True)
+
+            enter_state(harness.app, "focused")
+            time.sleep(args.settle)
+            print(f"sampling switcher-preview: {args.samples} passes", flush=True)
+            switcher = benchmark_switcher_preview(harness, args.samples)
+            results["switcher-preview"] = switcher["metrics"]
+            switcher_metadata = switcher["metadata"]
+            print(f"  {results['switcher-preview']}", flush=True)
         except HarnessError as exc:
             dump_diagnostics(harness, args.out)
             sys.exit(f"error: {exc}")
@@ -313,7 +396,7 @@ def cmd_run(args):
         harness.cleanup()
 
     payload = {
-        "schema": 2,
+        "schema": 3,
         "commit": git_sha(),
         # Each state is observed for samples x seconds total, split into
         # `samples` windows whose per-metric median is what `states` records.
@@ -323,6 +406,7 @@ def cmd_run(args):
         "seconds_per_window": args.seconds,
         "samples_per_state": args.samples,
         "states": results,
+        "switcher_preview": switcher_metadata,
     }
     if args.workload > 0:
         payload["workload"] = {
@@ -353,6 +437,8 @@ METRICS = (
     ("rss_mb", "Memory (RSS MB)", "{:.1f}", 25.0, None),
     ("cpu_ms_per_s", "CPU ms/s (powermetrics)", "{:.1f}", 5.0, 15.0),
     ("wakeups_per_s", "Wakeups/s (powermetrics)", "{:.1f}", 50.0, None),
+    ("total_ms", "Preview fill (ms)", "{:.1f}", 20.0, 20.0),
+    ("max_capture_ms", "Slowest pane capture (ms)", "{:.1f}", 5.0, 5.0),
 )
 
 # Corroboration rule for the PR LABEL — a separate, stricter gate than the
@@ -362,23 +448,23 @@ METRICS = (
 # resource regression perturbs several correlated metrics at once while
 # shared-runner noise trips one cell in isolation:
 #   1. at least MIN_LABEL_CELLS cells trip (a lone outlier can't label), and
-#   2. at least one tripped cell is a workload state — the regime that does
-#      real terminal work. The idle baseline is the noisiest state, so idle
-#      cells corroborate but can never carry a label by themselves.
+#   2. at least one tripped cell is a workload or interaction state — the
+#      regimes that do real terminal work. The idle baseline is the noisiest
+#      state, so idle cells corroborate but can never carry a label by itself.
 MIN_LABEL_CELLS = 2
 
 
-def is_workload_state(state):
-    return state.startswith("workload-")
+def is_signal_state(state):
+    return state.startswith("workload-") or state in INTERACTION_STATES
 
 
 def should_label(entries):
     """Whether a set of tripped cells (all same direction) warrants a PR label
     under the corroboration rule: ≥ MIN_LABEL_CELLS cells, at least one under a
-    workload state. Empty or idle-only sets never label."""
+    workload/interaction state. Empty or idle-only sets never label."""
     return (
         len(entries) >= MIN_LABEL_CELLS
-        and any(is_workload_state(e["state"]) for e in entries)
+        and any(is_signal_state(e["state"]) for e in entries)
     )
 
 
@@ -449,7 +535,7 @@ def cmd_report(args):
         current = json.load(f)
     baseline = pool_baselines(args.baseline) if args.baseline else None
 
-    lines = ["## Window-state benchmark", ""]
+    lines = ["## Runtime performance benchmark", ""]
     if baseline:
         baseline_runs = baseline.get("runs", 1)
         newest = baseline.get("commit", "unknown")[:9]
@@ -466,6 +552,7 @@ def cmd_report(args):
 
     regressions, improvements = [], []
     workload_missing_baseline = False
+    interaction_missing_baseline = False
     for state in STATES:
         cur_state = current["states"].get(state, {})
         if not cur_state:
@@ -473,6 +560,8 @@ def cmd_report(args):
         base_state = (baseline or {}).get("states", {}).get(state, {})
         if baseline and state in WORKLOAD_STATES and not base_state:
             workload_missing_baseline = True
+        if baseline and state in INTERACTION_STATES and not base_state:
+            interaction_missing_baseline = True
         state_cell = state  # only label the state's first row
         for key, label, pattern, floor, min_baseline in METRICS:
             cur = cur_state.get(key)
@@ -499,6 +588,16 @@ def cmd_report(args):
                 lines.append(f"| {state_cell} | {label} | {fmt(cur, pattern)} |")
             state_cell = ""
 
+    switcher = current.get("switcher_preview")
+    if switcher:
+        lines += [
+            "",
+            f"_Switcher workload: {switcher['tabs']} MRU tabs / {switcher['panes']} panes; "
+            f"last pass produced {switcher['images']} images, "
+            f"{switcher['placeholders']} placeholders, and "
+            f"{switcher['unavailable']} unavailable captures._",
+        ]
+
     for entries, label_name, verdict_line in (
         (regressions, "benchmark:regression", "regressed"),
         (improvements, "benchmark:improvement", "improved"),
@@ -517,7 +616,7 @@ def cmd_report(args):
                 "",
                 f"This PR is labeled `{label_name}` because ≥{MIN_LABEL_CELLS} metrics "
                 f"{verdict_line} by ≥{THRESHOLD_PCT}% vs {base_ref} (beyond each metric's "
-                "noise floor), at least one under workload:",
+                "noise floor), at least one under workload or interaction:",
                 "",
                 *cell_lines,
             ]
@@ -534,7 +633,7 @@ def cmd_report(args):
                 "",
                 f"_Not labeled `{label_name}`: {reason}. A label needs "
                 f"≥{MIN_LABEL_CELLS} metrics past threshold with at least one under "
-                f"workload. Flagged cells ({verdict_line}):_",
+                f"workload or interaction. Flagged cells ({verdict_line}):_",
                 "",
                 *cell_lines,
             ]
@@ -550,21 +649,24 @@ def cmd_report(args):
     samples = current.get("samples_per_state", 1)
     window = current.get("seconds_per_window", current["seconds_per_state"])
     if samples > 1:
-        sampling = (
+        resource_sampling = (
             f"median of {samples}×{window}s windows per state (splitting the window "
             "and taking the median keeps one co-scheduled spike from skewing a state)"
         )
+        interaction_sampling = f"median of {samples} preview passes"
     else:
-        sampling = f"{window}s window per state"
+        resource_sampling = f"{window}s window per state"
+        interaction_sampling = "one preview pass"
     lines += [
         "",
-        f"_Reported value is the {sampling}; CPU % is the process CPU-time delta "
+        f"_Resource values use the {resource_sampling}; switcher timing uses the "
+        f"{interaction_sampling}. CPU % is the process CPU-time delta "
         "over a window. Runs land on different "
         f"shared runners, so treat small deltas as noise — 🔺/🔻 marks changes ≥{THRESHOLD_PCT}% "
         f"that also clear the metric's absolute noise floor ({floors}); CPU deltas off a "
         f"noise-dominated baseline aren't flagged ({gates}). The `benchmark:regression` / "
         f"`benchmark:improvement` label needs corroboration — ≥{MIN_LABEL_CELLS} flagged "
-        "metrics in the same direction, at least one under workload — so a lone noisy cell "
+        "metrics in the same direction, at least one under workload or interaction — so a lone noisy cell "
         "shows its arrow here without tagging the PR._",
     ]
     if baseline is None:
@@ -583,6 +685,12 @@ def cmd_report(args):
             "_The `workload-*` states (busy tabs spawned via the `macterm` CLI) "
             "have no baseline yet — deltas for them appear once main's baseline "
             "includes a workload run._"
+        )
+    if baseline is not None and interaction_missing_baseline:
+        lines.append("")
+        lines.append(
+            "_The `switcher-preview` interaction has no baseline yet — its delta "
+            "appears once main includes the extended benchmark._"
         )
     print("\n".join(lines))
 

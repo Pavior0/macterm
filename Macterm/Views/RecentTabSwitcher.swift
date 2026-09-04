@@ -6,10 +6,11 @@ struct RecentTabSwitcherOverlay: View {
     private var appState
     @Environment(\.accessibilityReduceTransparency)
     private var reduceTransparency
+    @State
+    private var previewStore = RecentTabPreviewStore()
 
-    private static let panelWidth: CGFloat = 460
-    static let rowHeight: CGFloat = 54
-    static let maximumVisibleRows = 6
+    private static let maximumPanelWidth: CGFloat = 1080
+    private static let panelHorizontalMargin: CGFloat = 36
 
     var body: some View {
         GeometryReader { geometry in
@@ -27,6 +28,11 @@ struct RecentTabSwitcherOverlay: View {
                         sidebarIndex: metadata.sidebarIndex
                     )
                 }
+                let panelWidth = min(
+                    RecentTabSwitcherPanel.contentWidth(for: items.count),
+                    max(geometry.size.width - (Self.panelHorizontalMargin * 2), 0),
+                    Self.maximumPanelWidth
+                )
                 ZStack {
                     Color.black.opacity(0.001)
                         .contentShape(Rectangle())
@@ -35,9 +41,10 @@ struct RecentTabSwitcherOverlay: View {
 
                     RecentTabSwitcherPanel(
                         items: items,
-                        selectedTabID: cycle.selectedTabID
+                        selectedTabID: cycle.selectedTabID,
+                        previewStore: previewStore
                     )
-                    .frame(width: Self.panelWidth)
+                    .frame(width: panelWidth)
                     .recentTabSwitcherBackground(reduceTransparency: reduceTransparency)
                     .overlay {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -66,54 +73,54 @@ private struct RecentTabSwitcherPanel: View {
 
     let items: [RecentTabSwitcherItem]
     let selectedTabID: UUID
+    let previewStore: RecentTabPreviewStore
 
     /// Suppresses keyboard-style auto-scrolling for the next highlight made
-    /// by the pointer, so manual scrolling never moves the list underneath it.
+    /// by the pointer, so manual scrolling never moves the strip underneath it.
     @State
     private var selectionFromHover = false
     @State
-    private var rowFrames: [UUID: ClosedRange<CGFloat>] = [:]
+    private var cardFrames: [UUID: ClosedRange<CGFloat>] = [:]
 
-    private static let rowSpacing: CGFloat = 2
-    private static let contentInset: CGFloat = 6
-    private let rowSpace = "recentTabSwitcherRows"
+    fileprivate static let cardWidth: CGFloat = 202
+    private static let cardHeight: CGFloat = 154
+    private static let cardSpacing: CGFloat = 6
+    private static let contentInset: CGFloat = 8
+    private let cardSpace = "recentTabSwitcherCards"
 
-    private var visibleRowCount: Int {
-        min(items.count, RecentTabSwitcherOverlay.maximumVisibleRows)
-    }
-
-    private var listHeight: CGFloat {
-        let rows = CGFloat(visibleRowCount) * RecentTabSwitcherOverlay.rowHeight
-        let spacing = CGFloat(max(visibleRowCount - 1, 0)) * Self.rowSpacing
-        return rows + spacing + (Self.contentInset * 2)
-    }
-
-    private var showsScrollIndicator: Bool {
-        items.count > RecentTabSwitcherOverlay.maximumVisibleRows
+    static func contentWidth(for itemCount: Int) -> CGFloat {
+        let cards = CGFloat(itemCount) * cardWidth
+        let spacing = CGFloat(max(itemCount - 1, 0)) * cardSpacing
+        return cards + spacing + (contentInset * 2)
     }
 
     var body: some View {
+        let tabs = items.map(\.tab)
+        let paneIDs = tabs.flatMap { $0.splitRoot.allPanes().map(\.id) }
+
         ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                LazyVStack(spacing: Self.rowSpacing) {
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: Self.cardSpacing) {
                     ForEach(items) { item in
                         Button {
                             appState.commitRecentTabCycle(selecting: item.id)
                         } label: {
-                            RecentTabSwitcherRow(
+                            RecentTabSwitcherCard(
                                 tab: item.tab,
                                 sidebarIndex: item.sidebarIndex,
-                                isSelected: item.id == selectedTabID
+                                isSelected: item.id == selectedTabID,
+                                previewStore: previewStore
                             )
+                            .frame(width: Self.cardWidth, height: Self.cardHeight)
                         }
                         .buttonStyle(.plain)
                         .id(item.id)
                         .background(
                             GeometryReader { geometry in
-                                let frame = geometry.frame(in: .named(rowSpace))
+                                let frame = geometry.frame(in: .named(cardSpace))
                                 Color.clear.preference(
-                                    key: RecentTabSwitcherRowFramesKey.self,
-                                    value: [item.id: frame.minY ... frame.maxY]
+                                    key: RecentTabSwitcherCardFramesKey.self,
+                                    value: [item.id: frame.minX ... frame.maxX]
                                 )
                             }
                         )
@@ -121,13 +128,13 @@ private struct RecentTabSwitcherPanel: View {
                 }
                 .padding(Self.contentInset)
             }
-            .scrollIndicators(showsScrollIndicator ? .visible : .hidden)
-            .coordinateSpace(name: rowSpace)
-            .frame(height: listHeight)
-            .onPreferenceChange(RecentTabSwitcherRowFramesKey.self) { rowFrames = $0 }
-            .onContinuousHover(coordinateSpace: .named(rowSpace)) { phase in
+            .scrollIndicators(.visible)
+            .coordinateSpace(name: cardSpace)
+            .frame(height: Self.cardHeight + (Self.contentInset * 2))
+            .onPreferenceChange(RecentTabSwitcherCardFramesKey.self) { cardFrames = $0 }
+            .onContinuousHover(coordinateSpace: .named(cardSpace)) { phase in
                 guard case let .active(point) = phase,
-                      let tabID = rowFrames.first(where: { $0.value.contains(point.y) })?.key,
+                      let tabID = cardFrames.first(where: { $0.value.contains(point.x) })?.key,
                       selectedTabID != tabID
                 else { return }
                 selectionFromHover = true
@@ -143,13 +150,17 @@ private struct RecentTabSwitcherPanel: View {
             }
         }
         .foregroundStyle(MactermTheme.fg)
+        .task(id: paneIDs) {
+            await previewStore.refreshTabPreviews(tabs)
+        }
     }
 }
 
-private struct RecentTabSwitcherRow: View {
+private struct RecentTabSwitcherCard: View {
     let tab: TerminalTab
     let sidebarIndex: Int
     let isSelected: Bool
+    let previewStore: RecentTabPreviewStore
 
     @AppStorage(Preferences.Keys.tabIconSymbol, store: Preferences.defaults)
     private var tabIconSymbol = "terminal"
@@ -168,58 +179,43 @@ private struct RecentTabSwitcherRow: View {
     private var paneCount: Int { tab.splitRoot.allPanes().count }
 
     var body: some View {
-        HStack(spacing: 11) {
-            Group {
-                if showTabStatusIndicator {
-                    TabStatusIcon(
-                        state: tab.executionState,
-                        symbol: iconSymbol,
-                        index: sidebarIndex,
-                        agent: agentIcon,
-                        spinnerOverAgent: showSpinnerOverAgentIcons
-                    )
-                } else {
-                    WorkspaceItemIcon(symbol: iconSymbol, index: sidebarIndex, agent: agentIcon)
-                        .foregroundStyle(MactermTheme.fgMuted)
-                }
-            }
-            .frame(width: 20)
+        VStack(alignment: .leading, spacing: 7) {
+            RecentTabTerminalPreview(tab: tab, previewStore: previewStore)
+                .frame(maxWidth: .infinity)
+                .frame(height: 112)
 
-            VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Group {
+                    if showTabStatusIndicator {
+                        TabStatusIcon(
+                            state: tab.executionState,
+                            symbol: iconSymbol,
+                            index: sidebarIndex,
+                            agent: agentIcon,
+                            spinnerOverAgent: showSpinnerOverAgentIcons
+                        )
+                    } else {
+                        WorkspaceItemIcon(symbol: iconSymbol, index: sidebarIndex, agent: agentIcon)
+                            .foregroundStyle(MactermTheme.fgMuted)
+                    }
+                }
+                .frame(width: 18)
+
                 Text(tab.sidebarTitle)
-                    .font(.body)
+                    .font(.callout)
                     .foregroundStyle(MactermTheme.fg)
                     .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack(spacing: 7) {
-                    if let status = statusText {
-                        Text(status)
-                            .foregroundStyle(statusColor)
-                    }
-                    if let path = workingDirectoryText {
-                        Text(path)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    if paneCount > 1 {
-                        Text("\(paneCount) panes")
-                            .fixedSize()
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(MactermTheme.fgMuted)
+                Spacer(minLength: 4)
+
+                Text("\(sidebarIndex)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(MactermTheme.fgMuted.opacity(0.65))
+                    .fixedSize()
             }
-
-            Text("\(sidebarIndex)")
-                .font(.caption)
-                .monospacedDigit()
-                .foregroundStyle(MactermTheme.fgMuted.opacity(0.65))
-                .frame(minWidth: 18, alignment: .trailing)
-                .fixedSize()
         }
-        .padding(.horizontal, 10)
-        .frame(height: RecentTabSwitcherOverlay.rowHeight)
+        .padding(7)
         .background {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isSelected ? MactermTheme.surface : .clear)
@@ -234,14 +230,6 @@ private struct RecentTabSwitcherRow: View {
         case .idle: nil
         case .running: "Running"
         case .done: "Completed"
-        }
-    }
-
-    private var statusColor: Color {
-        switch tab.executionState {
-        case .idle: MactermTheme.fgMuted
-        case .running: MactermTheme.fg
-        case .done: MactermTheme.success
         }
     }
 
@@ -267,7 +255,84 @@ private struct RecentTabSwitcherRow: View {
     }
 }
 
-private struct RecentTabSwitcherRowFramesKey: PreferenceKey {
+private struct RecentTabTerminalPreview: View {
+    let tab: TerminalTab
+    let previewStore: RecentTabPreviewStore
+
+    var body: some View {
+        GeometryReader { geometry in
+            let frames = tab.splitRoot.paneFrames(
+                in: CGRect(origin: .zero, size: geometry.size)
+            )
+
+            ZStack(alignment: .topLeading) {
+                MactermTheme.bg
+
+                ForEach(tab.splitRoot.allPanes()) { pane in
+                    if let frame = frames[pane.id] {
+                        panePreview(pane)
+                            .frame(width: frame.width, height: frame.height)
+                            .clipped()
+                            .offset(x: frame.minX, y: frame.minY)
+                    }
+                }
+            }
+            .clipShape(.rect(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(MactermTheme.border.opacity(0.7), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 5, x: 0, y: 2)
+        }
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func panePreview(_ pane: Pane) -> some View {
+        if let image = previewStore.previewImage(for: pane.id) {
+            Image(decorative: image, scale: 1)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(MactermTheme.bg)
+        } else {
+            RecentTabTerminalPlaceholder()
+        }
+    }
+}
+
+private struct RecentTabTerminalPlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            placeholderLine(width: 0.62, showsPrompt: true)
+            placeholderLine(width: 0.78, showsPrompt: false)
+            placeholderLine(width: 0.42, showsPrompt: true)
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(MactermTheme.bg)
+    }
+
+    private func placeholderLine(width: CGFloat, showsPrompt: Bool) -> some View {
+        GeometryReader { geometry in
+            HStack(spacing: 6) {
+                if showsPrompt {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 7, weight: .semibold))
+                        .frame(width: 8)
+                }
+
+                Capsule()
+                    .frame(width: max(geometry.size.width * width - (showsPrompt ? 14 : 0), 12), height: 4)
+            }
+            .foregroundStyle(MactermTheme.fgMuted.opacity(0.26))
+            .frame(maxHeight: .infinity, alignment: .center)
+        }
+        .frame(height: 8)
+    }
+}
+
+private struct RecentTabSwitcherCardFramesKey: PreferenceKey {
     static let defaultValue: [UUID: ClosedRange<CGFloat>] = [:]
 
     static func reduce(

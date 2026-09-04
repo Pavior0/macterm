@@ -1578,12 +1578,11 @@ final class AppState {
         cycleRecentTab(projectID: projectID, showsSwitcher: Preferences.shared.showRecentTabSwitcher)
     }
 
-    #if DEBUG
-    /// Forces the visual path without mutating the user's preference.
+    /// Forces the visual path for the isolated benchmark/e2e harness without
+    /// mutating the user's preference.
     func cycleRecentTabForAutomation(projectID: UUID) {
         cycleRecentTab(projectID: projectID, showsSwitcher: true)
     }
-    #endif
 
     private func cycleRecentTab(projectID: UUID, showsSwitcher: Bool) {
         guard let workspace = workspaces[projectID] else { return }
@@ -1624,7 +1623,7 @@ final class AppState {
         recentTabCycle = cycle
     }
 
-    /// Commit the row clicked in the switcher. A stale row never commits a
+    /// Commit the card clicked in the switcher. A stale card never commits a
     /// different highlight if its tab disappeared between rendering and click.
     func commitRecentTabCycle(selecting tabID: UUID) {
         highlightRecentTab(tabID)
