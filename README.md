@@ -30,8 +30,6 @@
 
 ![Macterm's vertical project sidebar beside an editor and shell split](./assets/screenshot-1.png)
 
-_Projects and their tabs stack vertically in a native sidebar, with pinned tabs kept above them._
-
 <p align="center">
   <a href="https://macterm.thdxg.dev/#gallery"><b>More screenshots →</b></a>
 </p>
