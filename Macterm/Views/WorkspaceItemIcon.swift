@@ -88,22 +88,6 @@ struct WorkspaceItemIcon: View {
     }
 }
 
-private extension AgentIcon {
-    var brandColor: Color {
-        switch self {
-        case .claude: Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)
-        case .codex: Color(red: 0xAB / 255, green: 0xAB / 255, blue: 0xAB / 255)
-        case .gemini: Color(red: 0x42 / 255, green: 0x85 / 255, blue: 0xF4 / 255)
-        case .copilot: Color(red: 0x89 / 255, green: 0x57 / 255, blue: 0xE5 / 255)
-        case .antigravity: Color(red: 0x31 / 255, green: 0x86 / 255, blue: 0xFF / 255)
-        case .opencode,
-             .cursor,
-             .grok,
-             .pi: .primary
-        }
-    }
-}
-
 private extension SidebarIconSize {
     var imageScale: Image.Scale {
         switch self {
