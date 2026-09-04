@@ -64,6 +64,19 @@ final class TerminalTab: Identifiable {
         return "Terminal"
     }
 
+    /// The title text used by horizontal-tab chrome and its previews.
+    /// Horizontal tabs enumerate every pane in an unrenamed split, using the
+    /// same project-relative labels as the tab strip; a custom title always
+    /// wins, and an empty tree keeps the ordinary Terminal fallback.
+    func horizontalTabTitle(projectDirectory: String?) -> String {
+        if let customTitle { return customTitle }
+        let panes = splitRoot.allPanes()
+        guard !panes.isEmpty else { return "Terminal" }
+        return panes
+            .map { $0.sidebarSegmentTitle(projectDirectory: projectDirectory) }
+            .joined(separator: " | ")
+    }
+
     /// The AI-agent logo for this tab's sidebar row: the focused pane's
     /// running agent, else the first pane running one. nil when no pane has
     /// an agent in the foreground (the user's chosen tab icon shows instead).

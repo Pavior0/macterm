@@ -56,7 +56,7 @@ struct HorizontalWorkspaceTab: View {
                             }
                         }
                     } else {
-                        Text(tab.sidebarRowTitle(projectDirectory: projectDirectory))
+                        Text(tab.horizontalTabTitle(projectDirectory: projectDirectory))
                             .font(.system(size: 12, weight: isActive ? .medium : .regular))
                             .lineLimit(1)
                             .truncationMode(.middle)

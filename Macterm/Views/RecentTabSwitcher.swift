@@ -4,6 +4,8 @@ import SwiftUI
 struct RecentTabSwitcherOverlay: View {
     @Environment(AppState.self)
     private var appState
+    @Environment(ProjectStore.self)
+    private var projectStore
     @Environment(\.accessibilityReduceTransparency)
     private var reduceTransparency
     @State
@@ -21,11 +23,13 @@ struct RecentTabSwitcherOverlay: View {
                 let tabMetadataByID = Dictionary(uniqueKeysWithValues: workspace.tabs.enumerated().map { index, tab in
                     (tab.id, (tab: tab, sidebarIndex: index + 1))
                 })
+                let projectDirectory = projectStore.projects.first(where: { $0.id == cycle.projectID })?.path
                 let items = cycle.tabIDs.compactMap { tabID -> RecentTabSwitcherItem? in
                     guard let metadata = tabMetadataByID[tabID] else { return nil }
                     return RecentTabSwitcherItem(
                         tab: metadata.tab,
-                        sidebarIndex: metadata.sidebarIndex
+                        sidebarIndex: metadata.sidebarIndex,
+                        projectDirectory: projectDirectory
                     )
                 }
                 let panelWidth = min(
@@ -63,6 +67,7 @@ struct RecentTabSwitcherOverlay: View {
 private struct RecentTabSwitcherItem: Identifiable {
     let tab: TerminalTab
     let sidebarIndex: Int
+    let projectDirectory: String?
 
     var id: UUID { tab.id }
 }
@@ -108,6 +113,7 @@ private struct RecentTabSwitcherPanel: View {
                             RecentTabSwitcherCard(
                                 tab: item.tab,
                                 sidebarIndex: item.sidebarIndex,
+                                projectDirectory: item.projectDirectory,
                                 isSelected: item.id == selectedTabID,
                                 previewStore: previewStore
                             )
@@ -159,6 +165,7 @@ private struct RecentTabSwitcherPanel: View {
 private struct RecentTabSwitcherCard: View {
     let tab: TerminalTab
     let sidebarIndex: Int
+    let projectDirectory: String?
     let isSelected: Bool
     let previewStore: RecentTabPreviewStore
 
@@ -201,7 +208,7 @@ private struct RecentTabSwitcherCard: View {
                 }
                 .frame(width: 18)
 
-                Text(tab.sidebarTitle)
+                Text(tab.horizontalTabTitle(projectDirectory: projectDirectory))
                     .font(.callout)
                     .foregroundStyle(MactermTheme.fg)
                     .lineLimit(1)

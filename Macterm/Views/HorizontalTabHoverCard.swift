@@ -27,7 +27,7 @@ struct HorizontalTabHoverCard: View {
                         .foregroundStyle(.primary.opacity(Self.metadataOpacity))
                 }
 
-                Text(tab.sidebarTitle)
+                Text(tab.horizontalTabTitle(projectDirectory: projectDirectory))
                     .font(.headline)
                     .lineLimit(1)
 
