@@ -258,6 +258,36 @@ final class AppState {
     private var tabCycleIndex: Int = 0
     var isTabCycling: Bool { !tabCycleOrder.isEmpty }
 
+    /// The tab IDs the current cycle walks, most-recent-first, and where in
+    /// that list the gesture currently sits — what the tab switcher overlay
+    /// (#344) renders. Empty when no cycle is in flight.
+    var tabCycleTabIDs: [UUID] { tabCycleOrder }
+    var tabCycleSelection: Int { tabCycleIndex }
+
+    /// Last collected preview per pane, keyed by pane ID — what the tab
+    /// switcher renders.
+    ///
+    /// A cache rather than a capture at gesture time, because a pane only
+    /// holds a rendered frame while it is on screen (see `PanePreview`): by
+    /// the time the switcher wants to show you the tabs you are *not* on,
+    /// their pixels are gone. So the foreground poll collects a frame from
+    /// whatever is visible and this remembers it, and the strip shows each
+    /// tab as it last looked. Panes no frame was ever collected from fall
+    /// back to their live viewport text.
+    private(set) var panePreviews: [UUID: PanePreview] = [:]
+
+    /// Aspect ratio of the region a workspace's panes fill on screen, so the
+    /// switcher's cards can be shaped like the thing they picture rather than
+    /// cropping it. Measured from whichever tab is visible; every tab in the
+    /// workspace fills the same container, so one value shapes the strip.
+    private(set) var paneContainerAspect: CGFloat?
+
+    /// Throttle for the poll-driven collection above. The poll itself runs as
+    /// fast as 250ms in a burst; a thumbnail does not need that.
+    @ObservationIgnored
+    private var lastPanePreviewCapture = Date.distantPast
+    private static let panePreviewInterval: TimeInterval = 0.75
+
     private let workspaceStore: WorkspaceStore
 
     /// Whether the snapshot came back unreadable — the store stays private,
@@ -536,6 +566,7 @@ final class AppState {
     /// workspaces. Each pane only republishes (and triggers a tab re-render)
     /// when its name actually changes, so this is cheap when nothing's moving.
     func refreshAllForegroundProcesses() {
+        capturePanePreviewsIfDue()
         // Shell/raw-mode detection (KERN_PROCARGS2 + open/tcgetattr per pane)
         // and the quiet-settle only matter when the status indicator is shown;
         // skip them in icon mode so the default poll stays as cheap as before
@@ -1571,15 +1602,125 @@ final class AppState {
         }
     }
 
+    /// The modifiers the Recent Tab binding is held with, whatever the user
+    /// bound it to — the gesture both the switcher and the deferred commit
+    /// hang off. Read live rather than assumed: `ctrl+tab` is only the
+    /// default, and the commit used to hardcode Control, so rebinding the
+    /// action to `cmd+tab` left a cycle that never committed.
+    ///
+    /// Empty for a bare key, which cannot be *held*: there is no release to
+    /// commit on, so cycling degrades to switching straight away (below).
+    var recentTabHoldModifiers: NSEvent.ModifierFlags {
+        HotkeyRegistry.selectedShortcut(for: .recentTab)?.modifiers ?? []
+    }
+
     func cycleRecentTab(projectID: UUID) {
         guard let ws = workspaces[projectID] else { return }
         if tabCycleOrder.isEmpty {
             tabCycleOrder = ws.recencyOrder()
             tabCycleIndex = 0
+            prepareTabCyclePreviews(in: ws)
         }
         guard tabCycleOrder.count > 1 else { return }
         tabCycleIndex = (tabCycleIndex + 1) % tabCycleOrder.count
+        // A binding with no modifier has no release to commit on, so there is
+        // no hold gesture to preview: switch now and end the cycle.
+        if recentTabHoldModifiers.isEmpty {
+            commitTabCycle(projectID: projectID)
+            return
+        }
+        // With the switcher up, a repeat moves the SELECTION only: the tab
+        // behind it — and the pane holding focus — stays put until the
+        // modifier is released and `commitTabCycle` runs. That is the whole
+        // point of showing the candidates (#344), and it also keeps a long
+        // hold from dragging focus through every tab on the way past.
+        //
+        // Without the switcher there is nothing else to look at, so the
+        // original behavior stands: each press peeks the tab for real.
+        guard !Preferences.shared.showTabSwitcherOverlay else { return }
         ws.peekTab(tabCycleOrder[tabCycleIndex])
+    }
+
+    /// Bring the preview cache up to date for the workspace a cycle is about
+    /// to walk: refresh the visible tab (its frame is live right now) and give
+    /// every other pane a text fallback if nothing was ever collected from it.
+    /// Skipped entirely when the overlay is off, so the default cycling path
+    /// costs nothing.
+    private func prepareTabCyclePreviews(in ws: Workspace) {
+        guard Preferences.shared.showTabSwitcherOverlay else { return }
+        for tab in ws.tabs {
+            let isVisible = tab.id == ws.activeTabID
+            if isVisible, let aspect = PanePreviewCapture.containerAspect(of: tab) {
+                paneContainerAspect = aspect
+            }
+            // Re-capture a pane we know nothing about yet, not merely one with
+            // no entry at all. A capture can legitimately come back empty —
+            // the pane has no NSView until `SurfaceIncubator` warms it, no
+            // ghostty surface until that view gets a window and a size, and no
+            // text until its shell prints — and treating the first such answer
+            // as the answer left the card blank for the rest of the run, since
+            // an entry existed and nothing would replace it.
+            for pane in tab.splitRoot.allPanes()
+                where isVisible || panePreviews[pane.id]?.isEmpty ?? true
+            {
+                store(PanePreviewCapture.capture(pane), for: pane.id)
+            }
+        }
+        // Drop previews of panes that have closed. Checked across every
+        // workspace, not just this one — a cached preview belongs to a pane,
+        // and a pane in another project is still alive.
+        let live = Set(workspaces.values.flatMap { $0.tabs.flatMap { $0.splitRoot.allPanes().map(\.id) } })
+        panePreviews = panePreviews.filter { live.contains($0.key) }
+    }
+
+    /// Collect a frame from whatever is on screen, throttled. Called from the
+    /// foreground poll — the one place that already runs whenever a terminal
+    /// is visible and doing something.
+    private func capturePanePreviewsIfDue() {
+        guard Preferences.shared.showTabSwitcherOverlay,
+              let projectID = activeProjectID,
+              let tab = workspaces[projectID]?.activeTab
+        else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastPanePreviewCapture) >= Self.panePreviewInterval else { return }
+        lastPanePreviewCapture = now
+        if let aspect = PanePreviewCapture.containerAspect(of: tab) {
+            paneContainerAspect = aspect
+        }
+        for pane in tab.splitRoot.allPanes() {
+            store(PanePreviewCapture.capture(pane), for: pane.id)
+        }
+    }
+
+    /// Keep the best preview we have. A capture that came back frameless must
+    /// not erase a frame we already collected — that is the whole point of the
+    /// cache — and one that came back with nothing at all must not erase text
+    /// either, so a pane that goes quiet keeps showing what it last looked
+    /// like rather than blanking.
+    private func store(_ preview: PanePreview, for paneID: UUID) {
+        guard let existing = panePreviews[paneID] else {
+            panePreviews[paneID] = preview
+            return
+        }
+        if preview.image == nil, existing.image != nil { return }
+        if preview.isEmpty, !existing.isEmpty { return }
+        panePreviews[paneID] = preview
+    }
+
+    /// Point the in-flight cycle at `index` without committing — what hovering
+    /// a card in the switcher does. Out-of-range indices are ignored, since a
+    /// tab can close under the pointer mid-gesture.
+    func focusTabCycle(at index: Int) {
+        guard tabCycleOrder.indices.contains(index) else { return }
+        tabCycleIndex = index
+    }
+
+    /// Commit the cycle straight to `index` — what clicking a card does. The
+    /// modifier may still be held afterwards; the cycle is over either way, so
+    /// its eventual release finds nothing to commit.
+    func commitTabCycle(projectID: UUID, at index: Int) {
+        focusTabCycle(at: index)
+        commitTabCycle(projectID: projectID)
     }
 
     func commitTabCycle(projectID: UUID) {
