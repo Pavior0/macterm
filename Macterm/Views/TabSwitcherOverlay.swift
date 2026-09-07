@@ -14,10 +14,12 @@ import SwiftUI
 /// they are choosing between.
 ///
 /// The panel takes the pointer: hovering a card moves the selection, clicking
-/// one commits to it. Only the panel does — nothing else in the overlay draws
-/// a background, so presses outside it fall through to the terminal
-/// underneath. Note that a click here is necessarily a *modifier*-click, since
-/// releasing the modifier is what ends the gesture.
+/// one commits to it. A press anywhere OUTSIDE the panel cancels the gesture
+/// (backported from our implementation; upstream let it fall through to the
+/// terminal underneath) — the layer catching those presses is nearly
+/// transparent rather than clear so it still hit-tests, and hidden from
+/// accessibility. Note that a click here is necessarily a *modifier*-click,
+/// since releasing the modifier is what ends the gesture.
 ///
 /// With the strip up, cycling moves the selection only — the tab behind it and
 /// the pane holding focus stay put until the modifier is released (see
@@ -40,18 +42,23 @@ struct TabSwitcherOverlay: View {
         if let workspace = activeWorkspace, appState.tabCycleTabIDs.count > 1 {
             let entries = tabs(in: workspace)
             GeometryReader { geo in
-                TabSwitcherStrip(
-                    entries: entries,
-                    selection: appState.tabCycleSelection,
-                    availableWidth: geo.size.width,
-                    paneAspect: appState.paneContainerAspect,
-                    onHover: { appState.focusTabCycle(at: $0) },
-                    onClick: { index in
-                        guard let projectID = appState.activeProjectID else { return }
-                        appState.commitTabCycle(projectID: projectID, at: index)
-                    }
-                )
-                .glassPanel()
+                ZStack {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { appState.cancelTabCycle() }
+                        .accessibilityHidden(true)
+                    TabSwitcherStrip(
+                        entries: entries,
+                        selection: appState.tabCycleSelection,
+                        availableWidth: geo.size.width,
+                        onHover: { appState.focusTabCycle(at: $0) },
+                        onClick: { index in
+                            guard let projectID = appState.activeProjectID else { return }
+                            appState.commitTabCycle(projectID: projectID, at: index)
+                        }
+                    )
+                    .glassPanel(shadow: .theme)
+                }
                 // Centered: the strip is the whole interface for the gesture
                 // (the window behind it does not change until release), so it
                 // belongs where the eye already is rather than tucked at an
@@ -96,22 +103,19 @@ private struct TabSwitcherStrip: View {
     let entries: [TabSwitcherEntry]
     let selection: Int
     let availableWidth: CGFloat
-    /// Width over height of the region the panes actually fill, so cards are
-    /// shaped like the thing they picture. nil before anything was measured.
-    let paneAspect: CGFloat?
     /// Pointer handlers, both taking a card's index in the cycle order.
     let onHover: (Int) -> Void
     let onClick: (Int) -> Void
 
     private static let spacing: CGFloat = 10
-    /// Inset from the panel's edge to the cards. The preview inside a card
-    /// carries `TabSwitcherCard.selectionHalo` on top of this, so the gap the
-    /// eye actually reads — panel edge to picture — is the sum, equally on
-    /// every side. Anything that pads one axis and not the other shows up
+    /// Inset from the panel's edge to the cards (ours — upstream used 14; the
+    /// card's own padding carries the rest of the gap, so the edge-to-picture
+    /// distance is this plus `TabSwitcherCard.cardPadding`, equally on every
+    /// side). Anything that pads one axis and not the other shows up
     /// immediately here: the card used to carry a stray `.padding(.vertical, 2)`
     /// (left over from a uniform padding that was removed around it), which
     /// made the top gap 20 against 18 at the sides.
-    private static let insets: CGFloat = 14
+    private static let insets: CGFloat = 8
     /// Left clear on both sides of the panel, so it reads as floating in the
     /// window rather than spanning it.
     private static let windowMargin: CGFloat = 48
@@ -124,7 +128,7 @@ private struct TabSwitcherStrip: View {
     private static let peek: CGFloat = 34
 
     var body: some View {
-        let cardWidth = TabSwitcherCard.width(forPaneAspect: paneAspect)
+        let cardWidth = TabSwitcherCard.cardWidth
         let capacity = capacity(for: availableWidth, cardWidth: cardWidth)
         let step = cardWidth + Self.spacing
         let content = span(of: entries.count, cardWidth: cardWidth)
@@ -146,8 +150,7 @@ private struct TabSwitcherStrip: View {
                 TabSwitcherCard(
                     tab: entry.tab,
                     number: entry.number,
-                    isSelected: entry.index == selection,
-                    paneAspect: paneAspect
+                    isSelected: entry.index == selection
                 )
                 // `.clipped()` below clips hit testing too, so a card in the
                 // peek slots only answers the pointer over its visible sliver.
@@ -199,50 +202,35 @@ private struct TabSwitcherCard: View {
     /// The tab's 1-based number in the workspace, for the numbered tab icons.
     let number: Int
     let isSelected: Bool
-    let paneAspect: CGFloat?
 
-    /// Height of the preview at a comfortably wide pane region. A narrow
-    /// (portrait) one grows TALLER instead of the card growing wider than its
-    /// picture — see `previewHeight(forPaneAspect:)`.
-    private static let basePreviewHeight: CGFloat = 140
-    /// Ceiling on that growth, so an extremely tall pane region can't turn the
-    /// strip into a wall.
-    private static let maxPreviewHeight: CGFloat = 190
-    /// Width a narrow card is grown toward — enough to carry an icon and some
-    /// title. Reached by making the preview taller, NEVER by padding the card
-    /// wider than its picture: a card with surplus width has to distribute it,
-    /// and centering that surplus is what made the side padding drift away
-    /// from the top padding as the window changed shape.
-    private static let widthTarget: CGFloat = 116
-    /// Aspect assumed before anything has been measured. Only reachable for a
-    /// workspace whose panes have never been on screen this run.
-    static let fallbackAspect: CGFloat = 16.0 / 10.0
-    private static let cornerRadius: CGFloat = 8
-    /// Halo left around the preview for the selection fill to show in. Zero
-    /// would hide it: the thumbnail is opaque, so a highlight exactly the
-    /// preview's size sits entirely behind it.
-    private static let selectionHalo: CGFloat = 4
+    /// Fixed card metrics, backported from our implementation: one card shape
+    /// at every window and pane aspect. Upstream shaped each card by the live
+    /// pane-container aspect so leaves kept their real proportions, but that
+    /// made the strip's whole geometry — card width, panel width, capacity —
+    /// a function of the window shape, and a tall window produced tall
+    /// narrow cards next to a title row that never needed the room. Fixed
+    /// metrics keep `PaneMosaic`'s ratio-driven layout (relative proportions
+    /// are preserved) while the captured frames letterbox `.fit` inside their
+    /// leaves instead of dictating the card. Internal for the strip's
+    /// span/capacity math.
+    static let cardWidth: CGFloat = 202
+    private static let previewHeight: CGFloat = 112
+    /// Padding inside the card, around the preview and the title row. With the
+    /// full-card selection fill (below) this is also the fill's inset from the
+    /// card's rounded edge, so the selected card reads as one surface behind
+    /// both its picture and its title.
+    private static let cardPadding: CGFloat = 7
+    private static let previewCornerRadius: CGFloat = 8
+    private static let cardCornerRadius: CGFloat = 10
 
-    /// Aspect to lay out at, floored so a degenerate measurement can't divide
-    /// the height into something enormous.
-    private static func safeAspect(_ aspect: CGFloat?) -> CGFloat {
-        max(aspect ?? fallbackAspect, 0.2)
+    /// The preview area: the card minus its padding. Exactly this wide, so
+    /// the title row can ask for the same width and nothing in the card is
+    /// wider than its content — the #347 uniform-padding invariant.
+    private static var previewSize: CGSize {
+        CGSize(width: cardWidth - cardPadding * 2, height: previewHeight)
     }
 
-    /// Preview height for a pane region: the base, grown toward `widthTarget`
-    /// when the region is narrow, capped.
-    static func previewHeight(forPaneAspect aspect: CGFloat?) -> CGFloat {
-        min(maxPreviewHeight, max(basePreviewHeight, widthTarget / safeAspect(aspect)))
-    }
-
-    /// The card's width — exactly its preview plus the halo, at every aspect.
-    /// Keeping the two equal is what makes the panel's padding uniform by
-    /// construction: there is no surplus for a layout to distribute.
-    static func width(forPaneAspect aspect: CGFloat?) -> CGFloat {
-        (previewHeight(forPaneAspect: aspect) * safeAspect(aspect)).rounded() + selectionHalo * 2
-    }
-
-    private var cardWidth: CGFloat { Self.width(forPaneAspect: paneAspect) }
+    private var paneCount: Int { tab.splitRoot.allPanes().count }
 
     var body: some View {
         // Preview, title row and card are all exactly `cardWidth`: the preview
@@ -252,37 +240,23 @@ private struct TabSwitcherCard: View {
         // on every side at every window shape.
         VStack(alignment: .leading, spacing: 6) {
             PaneMosaic(node: tab.splitRoot, focusedPaneID: tab.focusedPaneID)
-                // The mosaic gets the pane region's real proportions, so every
-                // leaf inside it gets its own pane's proportions and the
-                // captured frames drop in uncropped.
-                .aspectRatio(Self.safeAspect(paneAspect), contentMode: .fit)
-                .frame(height: Self.previewHeight(forPaneAspect: paneAspect))
+                .frame(width: Self.previewSize.width, height: Self.previewSize.height)
                 // The gaps between leaves are the miniature split dividers, so
                 // they need a color of their own. Left transparent they showed
                 // whatever sat behind the card — the selection fill on the
                 // selected one, the glass panel on the rest — which made two
                 // cards of the same layout read as different things.
                 .background(MactermTheme.border)
-                .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Self.previewCornerRadius, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    RoundedRectangle(cornerRadius: Self.previewCornerRadius, style: .continuous)
                         .strokeBorder(MactermTheme.border.opacity(0.6), lineWidth: 1)
                 )
-                // The selection is a fill hugging the PREVIEW, evenly on all
-                // four sides and concentric with its corner, rather than a
-                // stroke around the whole card. A card-sized box was the wrong
-                // shape for it: the preview takes the pane region's aspect, so
-                // on a portrait window it sits well inside a card widened to
-                // hold the title, and the highlight framed empty panel instead
-                // of the picture.
-                .padding(Self.selectionHalo)
-                .background(
-                    RoundedRectangle(
-                        cornerRadius: Self.cornerRadius + Self.selectionHalo,
-                        style: .continuous
-                    )
-                    .fill(isSelected ? MactermTheme.fg.opacity(0.14) : .clear)
-                )
+                // The preview floats a little over the card — and over the
+                // selection fill behind it — so a card reads as stacked
+                // content rather than printed flat on the panel. Backported
+                // from our implementation.
+                .shadow(color: .black.opacity(0.24), radius: 5, x: 0, y: 2)
 
             HStack(spacing: 6) {
                 // The sidebar's own glyph, preferences and all — the chosen
@@ -306,11 +280,53 @@ private struct TabSwitcherCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            // Inset by the halo so the icon's leading edge lands on the
-            // preview's own edge rather than the highlight's.
-            .padding(.horizontal, Self.selectionHalo)
-            .frame(width: cardWidth, alignment: .leading)
+            .frame(width: Self.previewSize.width, alignment: .leading)
         }
+        .padding(Self.cardPadding)
+        // The selection fills the WHOLE card — preview and title row together,
+        // in `surface` — rather than a halo hugging the preview. Backported
+        // from our implementation: with the icon, title and picture all inside
+        // one surface, the selected card reads as a single chosen thing rather
+        // than a highlighted picture with an unhighlighted caption.
+        .background(
+            RoundedRectangle(cornerRadius: Self.cardCornerRadius, style: .continuous)
+                .fill(isSelected ? MactermTheme.surface : .clear)
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// One spoken label for the whole card (backported from our
+    /// implementation): number, title, execution state, working directory and
+    /// pane count, so VoiceOver users get everything the picture shows.
+    private var accessibilityLabel: String {
+        [
+            "Tab \(number)",
+            tab.sidebarTitle,
+            statusText,
+            workingDirectoryText,
+            paneCount > 1 ? "\(paneCount) panes" : nil,
+        ]
+        .compactMap(\.self)
+        .joined(separator: ", ")
+    }
+
+    private var statusText: String? {
+        switch tab.executionState {
+        case .idle: nil
+        case .running: "Running"
+        case .done: "Completed"
+        }
+    }
+
+    private var workingDirectoryText: String? {
+        guard let pane = tab.focusedPane else { return nil }
+        let path = pane.isRemote
+            ? pane.projectPath
+            : (pane.nsView?.currentPwd ?? pane.projectPath)
+        guard !path.isEmpty else { return nil }
+        return pane.isRemote ? path : (path as NSString).abbreviatingWithTildeInPath
     }
 }
 

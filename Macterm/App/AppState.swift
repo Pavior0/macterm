@@ -43,6 +43,12 @@ final class AppState {
     var activeProjectID: UUID? {
         didSet {
             Preferences.shared.activeProjectID = activeProjectID
+            // A tab cycle belongs to the project it started in; landing on
+            // another project mid-gesture (a global cycle, a click in the
+            // sidebar) cancels it, rather than leaving the eventual modifier
+            // release to commit a tab id from the old workspace against the
+            // new one.
+            if isTabCycling { cancelTabCycle() }
             // Becoming active IS the reload — `warmFocusedProject` only ever
             // spawns the focused project's shells — so this is the one choke
             // point every load path passes through, whether it went via
@@ -256,6 +262,12 @@ final class AppState {
     // Tab cycling state (Ctrl+Tab)
     private var tabCycleOrder: [UUID] = []
     private var tabCycleIndex: Int = 0
+    /// The project and tab that were active when the cycle started, so a
+    /// cancel can put things back exactly as they were. Direct mode (no
+    /// overlay) peeked tabs for real, so it needs the restore; with the
+    /// overlay up nothing moved and clearing the cycle is enough.
+    private var tabCycleProjectID: UUID?
+    private var tabCycleOriginalTabID: UUID?
     var isTabCycling: Bool { !tabCycleOrder.isEmpty }
 
     /// The tab IDs the current cycle walks, most-recent-first, and where in
@@ -275,12 +287,6 @@ final class AppState {
     /// tab as it last looked. Panes no frame was ever collected from fall
     /// back to their live viewport text.
     private(set) var panePreviews: [UUID: PanePreview] = [:]
-
-    /// Aspect ratio of the region a workspace's panes fill on screen, so the
-    /// switcher's cards can be shaped like the thing they picture rather than
-    /// cropping it. Measured from whichever tab is visible; every tab in the
-    /// workspace fills the same container, so one value shapes the strip.
-    private(set) var paneContainerAspect: CGFloat?
 
     /// Throttle for the poll-driven collection above. The poll itself runs as
     /// fast as 250ms in a burst; a thumbnail does not need that.
@@ -1797,8 +1803,19 @@ final class AppState {
     func cycleRecentTab(projectID: UUID) {
         guard let ws = workspaces[projectID] else { return }
         if tabCycleOrder.isEmpty {
-            tabCycleOrder = ws.recencyOrder()
+            // The switcher offers the N most recently used tabs — a
+            // preference, default 5. Upstream walked the FULL recency order,
+            // which outgrows any window on a busy project and pushes the
+            // interesting targets off the strip. Direct mode (no overlay)
+            // keeps the full order: plain cycling has no strip to fit and no
+            // reason to stop early.
+            let recency = ws.recencyOrder()
+            tabCycleOrder = Preferences.shared.showTabSwitcherOverlay
+                ? Array(recency.prefix(Preferences.shared.recentTabCandidates))
+                : recency
             tabCycleIndex = 0
+            tabCycleProjectID = projectID
+            tabCycleOriginalTabID = ws.activeTabID
             prepareTabCyclePreviews(in: ws)
         }
         guard tabCycleOrder.count > 1 else { return }
@@ -1830,9 +1847,6 @@ final class AppState {
         guard Preferences.shared.showTabSwitcherOverlay else { return }
         for tab in ws.tabs {
             let isVisible = tab.id == ws.activeTabID
-            if isVisible, let aspect = PanePreviewCapture.containerAspect(of: tab) {
-                paneContainerAspect = aspect
-            }
             // Re-capture a pane we know nothing about yet, not merely one with
             // no entry at all. A capture can legitimately come back empty —
             // the pane has no NSView until `SurfaceIncubator` warms it, no
@@ -1864,9 +1878,6 @@ final class AppState {
         let now = Date()
         guard now.timeIntervalSince(lastPanePreviewCapture) >= Self.panePreviewInterval else { return }
         lastPanePreviewCapture = now
-        if let aspect = PanePreviewCapture.containerAspect(of: tab) {
-            paneContainerAspect = aspect
-        }
         for pane in tab.splitRoot.allPanes() {
             store(PanePreviewCapture.capture(pane), for: pane.id)
         }
@@ -1905,14 +1916,37 @@ final class AppState {
 
     func commitTabCycle(projectID: UUID) {
         guard !tabCycleOrder.isEmpty, let ws = workspaces[projectID] else {
-            tabCycleOrder = []
+            resetTabCycle()
             return
         }
         let selectedID = tabCycleOrder[tabCycleIndex]
-        tabCycleOrder = []
-        tabCycleIndex = 0
+        resetTabCycle()
         ws.selectTab(selectedID)
         saveWorkspaces()
+    }
+
+    /// End the in-flight cycle without switching — Escape, a press outside the
+    /// switcher, or landing on another project mid-gesture. Direct mode
+    /// peeked real tabs, so it restores the tab that was active when the
+    /// cycle started — via `peekTab`, not `selectTab`, so an aborted gesture
+    /// leaves the MRU order untouched as well. With the overlay up nothing
+    /// moved, and clearing the cycle is all a cancel needs to do.
+    func cancelTabCycle() {
+        guard !tabCycleOrder.isEmpty else { return }
+        let projectID = tabCycleProjectID
+        let originalTabID = tabCycleOriginalTabID
+        resetTabCycle()
+        guard let projectID, let originalTabID,
+              !Preferences.shared.showTabSwitcherOverlay
+        else { return }
+        workspaces[projectID]?.peekTab(originalTabID)
+    }
+
+    private func resetTabCycle() {
+        tabCycleOrder = []
+        tabCycleIndex = 0
+        tabCycleProjectID = nil
+        tabCycleOriginalTabID = nil
     }
 
     enum GlobalTabDirection { case next, previous }

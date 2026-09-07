@@ -1058,6 +1058,7 @@ private struct AppearanceSettings: View {
     @State private var workspaceTabLayout: WorkspaceTabLayout = Preferences.shared.workspaceTabLayout
     @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
     @State private var showTabSwitcherOverlay: Bool = Preferences.shared.showTabSwitcherOverlay
+    @State private var recentTabCandidates: Int = Preferences.shared.recentTabCandidates
     @State private var tabSwitcherPosition: String = Preferences.shared.tabSwitcherPosition.rawValue
     @State
     private var backgroundOpacity: Double = Preferences.shared.windowOpacity
@@ -1246,6 +1247,13 @@ private struct AppearanceSettings: View {
                         + "and moves the selection without switching until you let go."
                 )
                 .settingsCaption()
+
+                Stepper("Recent Tab candidates: \(recentTabCandidates)", value: $recentTabCandidates, in: 2 ... 12)
+                    .onChange(of: recentTabCandidates) { _, v in
+                        Preferences.shared.recentTabCandidates = v
+                    }
+                Text("How many of the most recently used tabs the switcher offers while the shortcut is held.")
+                    .settingsCaption()
             }
 
             Section("Toolbar") {

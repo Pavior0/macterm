@@ -96,26 +96,6 @@ enum PanePreviewCapture {
         )
     }
 
-    /// Width over height of the region `tab`'s panes occupy on screen, or nil
-    /// while none of them is on screen.
-    ///
-    /// Taken as the union of the pane views' frames in window coordinates,
-    /// which is the container the split tree fills — so a card given this
-    /// aspect gives every leaf in the mosaic its pane's real proportions, and
-    /// the frames drop in without being cropped. Every tab in a workspace
-    /// fills the same container, so one measurement shapes the whole strip.
-    @MainActor
-    static func containerAspect(of tab: TerminalTab) -> CGFloat? {
-        let frames = tab.splitRoot.allPanes()
-            .compactMap(\.nsView)
-            .filter { $0.window != nil }
-            .map { $0.convert($0.bounds, to: nil) }
-        guard let first = frames.first else { return nil }
-        let union = frames.dropFirst().reduce(first) { $0.union($1) }
-        guard union.width > 0, union.height > 0 else { return nil }
-        return union.width / union.height
-    }
-
     /// The viewport's rows, top down, with the trailing run of blank lines
     /// dropped.
     ///

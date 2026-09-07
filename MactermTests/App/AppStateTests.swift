@@ -182,6 +182,164 @@ struct AppStateTests {
         #expect(!state.isTabCycling)
     }
 
+    @Test
+    func recent_tab_switcher_limits_candidates_to_the_preference() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        let priorCandidates = Preferences.shared.recentTabCandidates
+        defer {
+            Preferences.shared.showTabSwitcherOverlay = priorOverlay
+            Preferences.shared.recentTabCandidates = priorCandidates
+        }
+        Preferences.shared.showTabSwitcherOverlay = true
+        Preferences.shared.recentTabCandidates = 3
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        for _ in 0 ..< 6 {
+            state.createTab(projectID: project.id, projects: [project])
+        }
+
+        state.cycleRecentTab(projectID: project.id)
+
+        #expect(state.tabCycleTabIDs == Array(workspace.recencyOrder().prefix(3)))
+    }
+
+    @Test
+    func recent_tab_direct_mode_walks_the_full_recency_order() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        let priorCandidates = Preferences.shared.recentTabCandidates
+        defer {
+            Preferences.shared.showTabSwitcherOverlay = priorOverlay
+            Preferences.shared.recentTabCandidates = priorCandidates
+        }
+        Preferences.shared.showTabSwitcherOverlay = false
+        Preferences.shared.recentTabCandidates = 2
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        for _ in 0 ..< 4 {
+            state.createTab(projectID: project.id, projects: [project])
+        }
+
+        // Sampled BEFORE the cycle: direct mode peeks a tab for real on the
+        // first press, which reorders what `recencyOrder()` reports (the
+        // active tab is always first).
+        let expectedOrder = workspace.recencyOrder()
+        state.cycleRecentTab(projectID: project.id)
+
+        // The candidate cap only bounds the strip; plain cycling has no strip
+        // to fit and keeps the full order.
+        #expect(state.tabCycleTabIDs == expectedOrder)
+    }
+
+    @Test
+    func recent_tab_escape_cancels_a_direct_cycle_and_restores_the_original_tab() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        let priorShortcut = HotkeyRegistry.selectedShortcutString(for: .recentTab)
+        defer {
+            Preferences.shared.showTabSwitcherOverlay = priorOverlay
+            HotkeyRegistry.setShortcutString(priorShortcut, for: .recentTab)
+        }
+        Preferences.shared.showTabSwitcherOverlay = false
+        HotkeyRegistry.setShortcutString("ctrl+tab", for: .recentTab)
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        let recentID = try #require(workspace.activeTabID)
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-responder-projects-\(UUID().uuidString).json")
+        let responder = MainAppResponder(appState: state, projectStore: ProjectStore(fileURL: storeURL))
+        let tab = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .control,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48
+        ))
+        let escape = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .control,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\u{1b}",
+            charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false,
+            keyCode: 53
+        ))
+
+        // Direct mode peeked the previous tab for real…
+        _ = responder.handle(tab)
+        #expect(workspace.activeTabID == recentID)
+
+        // …so Escape has to put it back, without disturbing the MRU order
+        // (peek, not select).
+        _ = responder.handle(escape)
+        #expect(!state.isTabCycling)
+        #expect(workspace.activeTabID == currentID)
+        #expect(workspace.recencyOrder().first == currentID)
+    }
+
+    @Test
+    func recent_tab_escape_cancels_a_switcher_cycle_without_moving_the_terminal() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = priorOverlay }
+        Preferences.shared.showTabSwitcherOverlay = true
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        state.createTab(projectID: project.id, projects: [project])
+        state.createTab(projectID: project.id, projects: [project])
+        let currentID = try #require(workspace.activeTabID)
+
+        state.cycleRecentTab(projectID: project.id)
+        state.cycleRecentTab(projectID: project.id)
+        #expect(workspace.activeTabID == currentID)
+
+        state.cancelTabCycle()
+        #expect(!state.isTabCycling)
+        #expect(workspace.activeTabID == currentID)
+    }
+
+    @Test
+    func changing_projects_cancels_an_in_flight_cycle() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = priorOverlay }
+        Preferences.shared.showTabSwitcherOverlay = false
+
+        let state = makeAppState()
+        let firstProject = seedProject(state, name: "first")
+        let firstWorkspace = try #require(state.workspaces[firstProject.id])
+        let recentID = try #require(firstWorkspace.activeTabID)
+        state.createTab(projectID: firstProject.id, projects: [firstProject])
+        let currentID = try #require(firstWorkspace.activeTabID)
+
+        state.cycleRecentTab(projectID: firstProject.id)
+        #expect(firstWorkspace.activeTabID == recentID)
+
+        let secondProject = Project(name: "second", path: "/tmp", sortOrder: 1)
+        state.selectProject(secondProject)
+
+        // The cycle is cancelled and the first project's tab restored — the
+        // eventual modifier release must not commit a tab id from the old
+        // workspace against the new one.
+        #expect(!state.isTabCycling)
+        #expect(firstWorkspace.activeTabID == currentID)
+        #expect(state.activeProjectID == secondProject.id)
+    }
+
     // MARK: - Splits
 
     @Test

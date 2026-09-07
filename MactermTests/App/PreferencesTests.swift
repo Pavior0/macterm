@@ -21,6 +21,16 @@ struct PreferencesTests {
     }
 
     @Test
+    func recent_tab_candidates_default_to_five_and_round_trip() {
+        let prior = Preferences.shared.recentTabCandidates
+        defer { Preferences.shared.recentTabCandidates = prior }
+
+        #expect(Preferences.shared.recentTabCandidates == 5)
+        Preferences.shared.recentTabCandidates = 8
+        #expect(Preferences.defaults.integer(forKey: Preferences.Keys.recentTabCandidates) == 8)
+    }
+
+    @Test
     func sidebar_peek_style_round_trips() {
         let prior = Preferences.shared.sidebarPeekStyle
         defer { Preferences.shared.sidebarPeekStyle = prior }

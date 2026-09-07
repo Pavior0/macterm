@@ -3,105 +3,64 @@
 Context: `feat/horizontal-tabs` previously carried its own Recent Tab switcher
 (`0ceffbe`..`f6742c1`). `upstream/main` landed its own (#344/#346 previews,
 #347 padding/default-on). The merge of `ead9c4f` **keeps upstream's
-implementation and deletes ours**. This file records the differences for the
-backport work that follows. Branch-local — not meant for upstream PRs.
-A visual diff lives in `show-me-tab-switcher-ui-diff.html` (temp dir; reopen
-by re-running the show-me step).
+implementation and deletes ours**, then backports the pieces of ours worth
+keeping. Branch-local — not meant for upstream PRs.
 
-## What was deleted (ours)
+## Status
 
-- `Macterm/Views/RecentTabSwitcher.swift`, `RecentTabPreviewStore.swift`,
-  `Macterm/App/RecentTabCycle.swift`
-- Preference `showRecentTabSwitcher` (key `macterm.tabs.showRecentTabSwitcher`,
-  default **off**) — replaced by upstream's `showTabSwitcherOverlay`
-  (key `macterm.tabSwitcher.overlay`, default **on**).
-- Benchmark integration: `recentTabPreviewMetrics` status fields and
-  `benchmark.py`'s `switcher-preview` state (reverted to upstream's
-  `benchmark.py`). Upstream's preview pipeline is synchronous-from-cache, so
-  "preview fill time" no longer exists as a metric.
-- Escape-to-cancel, background-tap-to-cancel, menu-invocation commit — see
-  behavioral diffs below.
+### Applied on top of the merge
 
-## What was kept (upstream)
+- **Panel chrome**: upstream's `glassPanel()` kept, with our shadow
+  (`GlassPanelShadow.theme` — theme-colored r24/y10 vs the palette's black
+  r20/y8; parameterized so the palette is untouched). Panel insets are ours
+  (8, not 14) with the card's own padding carrying the rest.
+- **Selection**: our full-card `surface` fill (preview + title row as one
+  surface) instead of upstream's preview-hugging halo, plus our per-preview
+  shadow (black 0.24 / r5 / y2).
+- **Fixed card metrics**: 202×(112+title) at every window/pane aspect,
+  replacing upstream's pane-container-aspect shaping
+  (`paneContainerAspect` / `PanePreviewCapture.containerAspect` deleted).
+  `PaneMosaic`'s ratio-driven layout survives; captured frames letterbox
+  `.fit` in their leaves.
+- **Candidates capped by preference**: `recentTabCandidates` (Settings →
+  Appearance → Tab Switching, stepper 2…12, **default 5**) bounds the strip;
+  direct cycling keeps the full recency order. Upstream walked the full order.
+- **Escape cancels** the in-flight cycle (responder branch); direct mode
+  restores the original tab via `peekTab` (MRU untouched).
+- **Click outside the panel cancels** (near-transparent tap-catch layer in
+  the overlay; upstream let presses fall through to the terminal).
+- **Project switch cancels** the cycle (`activeProjectID` didSet) — the
+  modifier release can no longer commit a foreign tab id against the new
+  workspace.
+- **Accessibility**: per-card labels (number, title, execution state, working
+  directory, pane count) + `.isSelected` traits, backported from our card.
+- Title row deliberately NOT backported — upstream's `TabGlyph` +
+  `sidebarRowTitle` stays (ours carried cwd and a trailing index digit).
 
-- `TabSwitcherOverlay.swift`, `TabIcon.swift`, `GlassPanel.swift`,
-  `Terminal/PanePreview.swift`; the `tabCycleOrder`/`tabCycleIndex` state
-  machine; rebindable modifier-release commit
-  (`recentTabHoldModifiers` in the flags handler); preference default ON.
+### Still open (not requested)
 
-## UI differences (the "UI 侧有点区别" list)
+- **Menu/palette invocation strands the strip** — upstream's `action(in:)`
+  only cycles; a pointer invocation has no modifier release to commit, so
+  the strip stays up until some later modifier blip commits whatever is
+  highlighted. Our old `performMenuAction` distinguished keyboard vs pointer
+  invocation and committed immediately — the fix to port if this ever
+  bothers anyone upstream too.
 
-1. **Preview pipeline.** Ours captured lazily when the switcher opened
-   (async, progressive, CIContext / Display P3, fake placeholder art when a
-   pane had no frame). Upstream maintains a rolling `panePreviews` cache fed
-   by the 250 ms foreground poll (0.75 s throttle) plus a synchronous sweep at
-   cycle start; the no-frame fallback is the pane's **real viewport text**
-   typeset to scale — no fake prompt lines.
-2. **Strip mechanics.** Ours was a real `ScrollView` (LazyHStack, visible
-   indicators, `scrollTo(.center)` auto-scroll with hover suppression so
-   manual scrolling never fights it). Upstream is a fixed-capacity **viewport**
-   computed from window width, with the whole row translated under `.clipped()`,
-   eased 0.16 s offset, and "peek" slivers at the panel edges as the overflow
-   indicator. Upstream cards are shaped by the live pane-container aspect
-   ratio; ours were fixed 202×154.
-3. **Card title row.** Ours: `horizontalTabTitle(projectDirectory:)` (includes
-   cwd) + trailing index digit. Upstream: `sidebarRowTitle` + `TabGlyph` —
-   the single glyph decision shared with the sidebar, honoring all four icon
-   preferences including the new project-color-tag tint. Upstream's numbered
-   icon variants consume the tab's 1-based workspace number.
-4. **Selection chrome.** Ours filled the whole card; upstream draws a halo
-   hugging the preview, concentric with its corner — uniform padding by
-   construction (#347).
-5. **Panel chrome.** Ours rolled its own glass/material background + border +
-   shadow + 5 %-height upward offset. Upstream reuses the command palette's
-   `glassPanel()`.
-6. **MRU membership.** Ours capped the strip at 5 most-recent tabs; upstream
-   walks the full recency order (the viewport keeps the panel width stable).
-7. **Accessibility.** Ours had explicit per-card accessibility labels and
-   `.isSelected` traits; upstream has none specific.
+## Underlying differences that remain (context)
 
-## Behavioral diffs — backport candidates
+- **Preview pipeline**: upstream's rolling `panePreviews` cache (foreground
+  poll, 0.75s throttle, synchronous sweep at cycle start, real viewport-text
+  fallback) — strictly better than our lazy capture + fake placeholder art.
+- **Strip mechanics**: upstream's fixed-capacity viewport + peek slivers +
+  0.16s translated row — better than our ScrollView (and at fixed card
+  metrics the capacity math is stable again).
+- **Preference migration**: anyone who opted out on our branch
+  (`showRecentTabSwitcher = false`) lands on the new default ON. Honor the
+  old key as an implicit opt-out if this ever ships.
 
-Ordered by value:
+## Automation seam — deleted
 
-1. **Menu/palette invocation leaves the strip stranded (upstream bug-ish).**
-   Ours distinguished keyboard vs pointer invocation (`performMenuAction`):
-   a pointer invocation has no modifier release, so it committed immediately.
-   Upstream's one-shot `action(in:)` only cycles — invoking "Recent Tab" from
-   the menu/palette opens the strip with nothing to commit it (any later
-   modifier blip commits whatever is highlighted). **Backport: commit (or
-   one-shot cycle+commit) on non-keyboard invocation.**
-2. **Escape-to-cancel.** Ours cancelled the in-flight cycle on Escape
-   (responder branch + unit/e2e tests). Upstream has no Escape path; the only
-   exits are commit and click. **Backport: cheap, well-tested in our history.**
-3. **Background tap-to-cancel.** Ours had a full-overlay tap layer calling
-   cancel; upstream lets presses outside the panel fall through to the
-   terminal (deliberate: the gesture is over in under a second). Judgment
-   call; ours was friendlier for pointer users.
-4. **Project switch mid-cycle.** Ours cancelled the cycle when
-   `activeProjectID` changed (didSet guard + test). Upstream leaves the
-   in-flight order pointing at the old workspace; the eventual release
-   commits against the *new* project's workspace with a foreign tab id
-   (select no-ops). Rare (requires switching project while holding the
-   binding), but the guard is three lines.
-5. **Accessibility labels** — no-brainer to re-add on upstream's cards.
-
-## Automation seam — deleted (second pass)
-
-The first merge commit kept our e2e automation adapted to upstream's state
-machine (`cycleRecentTabForAutomation` forcing the overlay path via
-`isTabSwitcherOverlayEffective`, status fields `recentTabSwitcherVisible` /
-`recentTabSelectedTabID` re-derived from `tabCycleTabIDs` /
-`tabCycleSelection`). Dropped on review: upstream has no such seam, and the
-switcher state machine is already covered by unit tests
-(`recent_tab_cycle_defers_selection_and_commits_mru` etc. in
-`AppStateTests`). Removed with it: `e2e/test_recent_tab_switcher.py`,
-the `recent-tab-cycle` / `recent-tab-commit` Darwin notifications, and the
-status fields (back to upstream's `ControlStatusInfo` shape exactly).
-
-## Preference migration note
-
-Anyone who opted **out** on our branch (`showRecentTabSwitcher = false`) has
-no equivalent setting after this merge — the new key defaults to ON. Harmless
-for a feature branch, but if this ever ships, honor the old key as an
-implicit opt-out in `Preferences.init`.
+The merge's first pass kept our e2e automation adapted (see git history);
+dropped in favor of unit coverage in `AppStateTests` (cycle/commit/cancel,
+candidate cap, project-switch cancel, escape restore) — upstream carries no
+such seam.

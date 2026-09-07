@@ -319,6 +319,16 @@ final class Preferences {
         didSet { defaults.set(showTabSwitcherOverlay, forKey: Keys.showTabSwitcherOverlay) }
     }
 
+    /// How many of the most recently used tabs the switcher offers while the
+    /// Recent Tab shortcut is held. Default 5 — the full recency order
+    /// upstream walks outgrows any window on a busy project and pushes the
+    /// interesting targets off the strip. Direct cycling (switcher off) is
+    /// unaffected and keeps the full order. Clamped to 2…12 on read, so a
+    /// hand-edited or stale value can't empty or flood the strip.
+    var recentTabCandidates: Int {
+        didSet { defaults.set(recentTabCandidates, forKey: Keys.recentTabCandidates) }
+    }
+
     /// Whether the running spinner also replaces an AI agent's logo (#225).
     /// Off keeps the agent logo while the agent works — agent CLIs draw their
     /// own busy indicator in the tab title, so the spinner is redundant there —
@@ -834,6 +844,9 @@ final class Preferences {
         showAgentIcons = defaults.object(forKey: Keys.showAgentIcons) as? Bool ?? true
         showTabStatusIndicator = defaults.object(forKey: Keys.showTabStatusIndicator) as? Bool ?? false
         showTabSwitcherOverlay = defaults.object(forKey: Keys.showTabSwitcherOverlay) as? Bool ?? true
+        recentTabCandidates = Self.clampRecentTabCandidates(
+            defaults.object(forKey: Keys.recentTabCandidates) as? Int
+        )
         showSpinnerOverAgentIcons = defaults.object(forKey: Keys.showSpinnerOverAgentIcons) as? Bool ?? true
         autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
         autoAssignProjectColors = defaults.object(forKey: Keys.autoAssignProjectColors) as? Bool ?? false
@@ -870,6 +883,14 @@ final class Preferences {
     static func clampSidebarWidth(_ v: Double?) -> Double {
         guard let v, v > 0 else { return defaultSidebarWidth }
         return min(max(v, sidebarWidthRange.lowerBound), sidebarWidthRange.upperBound)
+    }
+
+    /// Default and bounds for `recentTabCandidates`. The lower bound is 2 —
+    /// one candidate is nothing to switch to — and the upper bound keeps the
+    /// strip inside any window at the card metrics `TabSwitcherCard` ships.
+    private static func clampRecentTabCandidates(_ v: Int?) -> Int {
+        guard let v else { return 5 }
+        return min(max(v, 2), 12)
     }
 
     private static func clampScrollSpeed(_ v: Double, fallback: Double) -> Double {
@@ -966,6 +987,7 @@ final class Preferences {
         static let showAgentIcons = "macterm.sidebar.showAgentIcons"
         static let showTabStatusIndicator = "macterm.sidebar.showTabStatusIndicator"
         static let showTabSwitcherOverlay = "macterm.tabSwitcher.overlay"
+        static let recentTabCandidates = "macterm.tabs.recentTabCandidates"
         static let showSpinnerOverAgentIcons = "macterm.sidebar.showSpinnerOverAgentIcons"
         static let autoNameTabs = "macterm.tabs.autoName"
         static let autoAssignProjectColors = "macterm.projects.autoAssignColors"
