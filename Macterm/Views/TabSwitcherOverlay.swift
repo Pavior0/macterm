@@ -129,8 +129,8 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
         Coordinator()
     }
 
-    func makeNSView(context: Context) -> AnchorView {
-        let view = AnchorView()
+    func makeNSView(context: Context) -> TabSwitcherPanelAnchorView {
+        let view = TabSwitcherPanelAnchorView()
         let coordinator = context.coordinator
         // `updateNSView` can run before SwiftUI inserts the view into the
         // window's hierarchy, when there is no window to center on yet —
@@ -142,7 +142,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ anchorView: AnchorView, context: Context) {
+    func updateNSView(_ anchorView: TabSwitcherPanelAnchorView, context: Context) {
         context.coordinator.update(
             anchorView: anchorView,
             content: content,
@@ -151,7 +151,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
         )
     }
 
-    static func dismantleNSView(_ nsView: AnchorView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: TabSwitcherPanelAnchorView, coordinator: Coordinator) {
         _ = nsView
         coordinator.dismiss()
     }
@@ -185,7 +185,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
 
         /// The `makeNSView` retry path: the anchor landed in a window after
         /// the last `update` found none.
-        func retryPresentation(anchorView: NSView) {
+        func retryPresentation(anchorView: TabSwitcherPanelAnchorView) {
             guard let content, let contentWidth, let window = anchorView.window else { return }
             present(content, contentWidth: contentWidth, centeredOn: window)
         }
@@ -298,7 +298,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
 
 /// Mount point that reports when it actually lands in a window (see
 /// `TabSwitcherPanelPresenter.makeNSView`).
-private final class AnchorView: NSView {
+private final class TabSwitcherPanelAnchorView: NSView {
     var onWindowAttached: (() -> Void)?
 
     override func viewDidMoveToWindow() {
@@ -344,17 +344,24 @@ private struct TabSwitcherStrip: View {
     private static let preferredColumns = 5
     private static let preferredCardWidth: CGFloat = 180
     private static let screenMargin: CGFloat = 32
+    private static var visibleScreen: NSRect {
+        (NSApp.keyWindow ?? NSApp.mainWindow)?.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+    }
+
     static var availableWidth: CGFloat {
-        let screenWidth = (NSApp.keyWindow ?? NSApp.mainWindow)?.screen?.visibleFrame.width
-            ?? NSScreen.main?.visibleFrame.width
-            ?? 1200
         let screenContentWidth = max(
             TabSwitcherCard.minimumCardWidth,
-            screenWidth - screenMargin * 2 - insets * 2
+            visibleScreen.width - screenMargin * 2 - insets * 2
         )
         let preferredContentWidth = CGFloat(preferredColumns) * preferredCardWidth
             + CGFloat(preferredColumns - 1) * spacing
         return min(screenContentWidth, preferredContentWidth)
+    }
+
+    static var availableHeight: CGFloat {
+        max(1, visibleScreen.height - screenMargin * 2 - insets * 2)
     }
 
     private static func rows(
@@ -364,21 +371,24 @@ private struct TabSwitcherStrip: View {
         let usableWidth = max(availableWidth, TabSwitcherCard.minimumCardWidth)
         var rows: [[TabSwitcherEntry]] = []
         var row: [TabSwitcherEntry] = []
-        var rowWidth: CGFloat = 0
 
         for entry in entries {
             let cardWidth = TabSwitcherCard.width(for: entry.previewAspect)
-            let proposedWidth = row.isEmpty ? cardWidth : rowWidth + spacing + cardWidth
+            let proposedWidth = width(of: row) + (row.isEmpty ? 0 : spacing) + cardWidth
             if !row.isEmpty, proposedWidth > usableWidth {
                 rows.append(row)
                 row = []
-                rowWidth = 0
             }
             row.append(entry)
-            rowWidth = row.isEmpty ? cardWidth : rowWidth + (row.count == 1 ? 0 : spacing) + cardWidth
         }
         if !row.isEmpty { rows.append(row) }
         return rows
+    }
+
+    private static func width(of row: [TabSwitcherEntry]) -> CGFloat {
+        row.reduce(CGFloat.zero) { width, entry in
+            width + TabSwitcherCard.width(for: entry.previewAspect)
+        } + CGFloat(max(0, row.count - 1)) * spacing
     }
 
     /// The strip's exact width for `entryCount` cards — computed, because the
@@ -390,34 +400,38 @@ private struct TabSwitcherStrip: View {
     /// reports a near-zero intrinsic size when asked without one.
     static func width(for entries: [TabSwitcherEntry], availableWidth: CGFloat) -> CGFloat {
         let layoutRows = Self.rows(for: entries, availableWidth: availableWidth)
-        let widestRow = layoutRows.map { row in
-            row.reduce(CGFloat.zero) { width, entry in
-                width + TabSwitcherCard.width(for: entry.previewAspect)
-            } + CGFloat(max(0, row.count - 1)) * spacing
-        }.max() ?? TabSwitcherCard.minimumCardWidth
+        let widestRow = layoutRows.map { width(of: $0) }.max() ?? TabSwitcherCard.minimumCardWidth
         return widestRow + insets * 2
     }
 
     var body: some View {
         let rows = Self.rows(for: entries, availableWidth: availableWidth)
-        VStack(spacing: Self.spacing) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: Self.spacing) {
-                    ForEach(row, id: \.tab.id) { entry in
-                        TabSwitcherCard(
-                            tab: entry.tab,
-                            number: entry.number,
-                            isSelected: entry.index == selection,
-                            previewAspect: entry.previewAspect,
-                            onActivate: { onClick(entry.index) }
-                        )
-                        .onHover { if $0 { onHover(entry.index) } }
-                        .onTapGesture { onClick(entry.index) }
+        ScrollView(.vertical) {
+            VStack(spacing: Self.spacing) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: Self.spacing) {
+                        ForEach(row, id: \.tab.id) { entry in
+                            TabSwitcherCard(
+                                tab: entry.tab,
+                                number: entry.number,
+                                isSelected: entry.index == selection,
+                                previewAspect: entry.previewAspect,
+                                onActivate: { onClick(entry.index) }
+                            )
+                            .onHover { if $0 { onHover(entry.index) } }
+                            .onTapGesture { onClick(entry.index) }
+                        }
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        .scrollIndicators(.hidden)
+        // Unlimited candidates still need a reachable panel on a short
+        // display. Vertical scrolling is the overflow path; rows never scroll
+        // horizontally because their cards were packed against the width
+        // proposal above.
+        .frame(maxHeight: Self.availableHeight)
         .padding(Self.insets)
         // Bare glass, no stroke: the glass draws its own adaptive edge, and
         // the hairline border of `glassPanel` (the palette's recipe) stacked
