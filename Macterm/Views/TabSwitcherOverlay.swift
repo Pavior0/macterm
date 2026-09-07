@@ -433,18 +433,10 @@ private struct TabSwitcherStrip: View {
         // proposal above.
         .frame(maxHeight: Self.availableHeight)
         .padding(Self.insets)
-        // Bare glass, no stroke: the glass draws its own adaptive edge, and
-        // the hairline border of `glassPanel` (the palette's recipe) stacked
-        // on it read, in this standalone panel, as a dark ring around the
-        // strip. The drop shadow is deliberately not here either — the window
-        // is exactly content-sized, so a SwiftUI shadow would clip at its
-        // bounds; the panel's WINDOW shadow provides the depth instead (see
+        // Bare glass, no custom stroke: the material draws its own adaptive
+        // edge. The panel's window shadow provides the depth (see
         // `makePanel`).
         .glassPanelBackground(cornerRadius: GlassPanelMetrics.cornerRadius)
-        .overlay(
-            RoundedRectangle(cornerRadius: GlassPanelMetrics.cornerRadius, style: .continuous)
-                .strokeBorder(MactermTheme.border, lineWidth: 1)
-        )
     }
 }
 
