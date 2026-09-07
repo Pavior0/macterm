@@ -57,6 +57,18 @@ struct PreferencesTests {
     }
 
     @Test
+    func project_new_tab_button_defaults_on_and_round_trips() {
+        let prior = Preferences.shared.showProjectNewTabButton
+        defer { Preferences.shared.showProjectNewTabButton = prior }
+
+        // Fresh (wiped) test suite preserves the hover shortcut by default.
+        #expect(Preferences.shared.showProjectNewTabButton)
+
+        Preferences.shared.showProjectNewTabButton = false
+        #expect(Preferences.defaults.object(forKey: Preferences.Keys.showProjectNewTabButton) as? Bool == false)
+    }
+
+    @Test
     func installation_id_is_lazily_created_stable_and_label_safe() {
         let first = Preferences.shared.installationID
         // Stable across reads (it's the persistent ownership identity zmx
@@ -116,6 +128,7 @@ struct PreferencesTests {
     @Test
     func sidebar_width_is_clamped_to_the_column_bounds() {
         let range = Preferences.sidebarWidthRange
+        #expect(Preferences.defaultSidebarWidth == 220)
         #expect(Preferences.clampSidebarWidth(nil) == Preferences.defaultSidebarWidth)
         #expect(Preferences.clampSidebarWidth(0) == Preferences.defaultSidebarWidth)
         #expect(Preferences.clampSidebarWidth(range.lowerBound - 40) == range.lowerBound)
