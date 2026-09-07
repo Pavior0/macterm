@@ -104,32 +104,11 @@ final class ControlHandler {
     private func status() -> ControlData {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         let active = projectStore.projects.first { $0.id == appState.activeProjectID }
-        // The switcher's in-flight state, for the e2e suite: visible only
-        // while a cycle is up AND the overlay path is in effect (the e2e
-        // harness forces it on — see `cycleRecentTabForAutomation`).
-        // Benchmark-gated in release builds; always present in debug so the
-        // suite runs against the Debug app without the env var.
-        #if DEBUG
-        let recentTabSwitcherVisible: Bool? =
-            appState.isTabCycling && appState.isTabSwitcherOverlayEffective
-        let recentTabSelectedTabID: String? = appState.isTabCycling
-            ? appState.tabCycleTabIDs[appState.tabCycleSelection].uuidString
-            : nil
-        #else
-        let recentTabSwitcherVisible: Bool? = BenchmarkControl.isEnabled
-            ? (appState.isTabCycling && appState.isTabSwitcherOverlayEffective)
-            : nil
-        let recentTabSelectedTabID: String? = BenchmarkControl.isEnabled && appState.isTabCycling
-            ? appState.tabCycleTabIDs[appState.tabCycleSelection].uuidString
-            : nil
-        #endif
         return ControlData(status: ControlStatusInfo(
             version: version,
             pid: getpid(),
             activeProject: active?.name,
-            activeProjectID: active?.id.uuidString,
-            recentTabSwitcherVisible: recentTabSwitcherVisible,
-            recentTabSelectedTabID: recentTabSelectedTabID
+            activeProjectID: active?.id.uuidString
         ))
     }
 

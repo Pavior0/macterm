@@ -1817,28 +1817,8 @@ final class AppState {
         //
         // Without the switcher there is nothing else to look at, so the
         // original behavior stands: each press peeks the tab for real.
-        guard !isTabSwitcherOverlayEffective else { return }
+        guard !Preferences.shared.showTabSwitcherOverlay else { return }
         ws.peekTab(tabCycleOrder[tabCycleIndex])
-    }
-
-    /// Automation seam for the benchmark/e2e harness: forces the overlay's
-    /// behavioral path on without touching the user's preference — the harness
-    /// does not isolate the UserDefaults domain, so `BenchmarkControl` can't
-    /// just flip `showTabSwitcherOverlay` (see `cycleRecentTabForAutomation`).
-    @ObservationIgnored
-    var forcesTabSwitcherOverlayForAutomation = false
-
-    /// Whether a cycle takes the switcher's path: the user's preference, or
-    /// the automation override above.
-    var isTabSwitcherOverlayEffective: Bool {
-        forcesTabSwitcherOverlayForAutomation || Preferences.shared.showTabSwitcherOverlay
-    }
-
-    /// Forces the visual path for the isolated benchmark/e2e harness without
-    /// mutating the user's preference.
-    func cycleRecentTabForAutomation(projectID: UUID) {
-        forcesTabSwitcherOverlayForAutomation = true
-        cycleRecentTab(projectID: projectID)
     }
 
     /// Bring the preview cache up to date for the workspace a cycle is about
@@ -1847,7 +1827,7 @@ final class AppState {
     /// Skipped entirely when the overlay is off, so the default cycling path
     /// costs nothing.
     private func prepareTabCyclePreviews(in ws: Workspace) {
-        guard isTabSwitcherOverlayEffective else { return }
+        guard Preferences.shared.showTabSwitcherOverlay else { return }
         for tab in ws.tabs {
             let isVisible = tab.id == ws.activeTabID
             if isVisible, let aspect = PanePreviewCapture.containerAspect(of: tab) {
@@ -1877,7 +1857,7 @@ final class AppState {
     /// foreground poll — the one place that already runs whenever a terminal
     /// is visible and doing something.
     private func capturePanePreviewsIfDue() {
-        guard isTabSwitcherOverlayEffective,
+        guard Preferences.shared.showTabSwitcherOverlay,
               let projectID = activeProjectID,
               let tab = workspaces[projectID]?.activeTab
         else { return }
