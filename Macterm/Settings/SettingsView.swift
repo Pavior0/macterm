@@ -1057,6 +1057,7 @@ private struct AppearanceSettings: View {
     @State private var showNewProjectButton: Bool = Preferences.shared.showNewProjectButton
     @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
     @State private var showTabSwitcherOverlay: Bool = Preferences.shared.showTabSwitcherOverlay
+    @State private var recentTabCandidates: Int = Preferences.shared.recentTabCandidates
     @State private var tabSwitcherPosition: String = Preferences.shared.tabSwitcherPosition.rawValue
     @State
     private var backgroundOpacity: Double = Preferences.shared.windowOpacity
@@ -1226,6 +1227,20 @@ private struct AppearanceSettings: View {
                 Text(
                     "Holding the Recent Tab shortcut shows the project's tabs with a preview of each pane, "
                         + "and moves the selection without switching until you let go."
+                )
+                .settingsCaption()
+
+                Picker("Recent tabs shown", selection: $recentTabCandidates) {
+                    ForEach(2 ... 12, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                    Text("Unlimited").tag(0)
+                }
+                .onChange(of: recentTabCandidates) { _, v in
+                    Preferences.shared.recentTabCandidates = v
+                }
+                Text(
+                    "How many of the most recently used tabs the switcher offers while the shortcut is held. Unlimited includes every tab."
                 )
                 .settingsCaption()
             }

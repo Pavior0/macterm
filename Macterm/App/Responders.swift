@@ -182,6 +182,13 @@ final class MainAppResponder: KeyResponder {
             return .passThrough
         }
 
+        // While a Recent Tab cycle is in flight, Escape cancels it instead of
+        // reaching the terminal.
+        if appState.isTabCycling, HotkeyRegistry.eventToken(event) == "escape" {
+            appState.cancelTabCycle()
+            return .handled
+        }
+
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         // Passthrough gate, ahead of every action branch: a binding the user
