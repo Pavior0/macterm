@@ -8,18 +8,17 @@ import SwiftUI
 /// Deliberately not the command palette: the palette is a search surface with
 /// a text field and a focus handoff, while this is a heads-up display for a
 /// gesture that starts and ends inside one key-hold. It shares the palette's
-/// chrome (`glassPanel`) so the two read as the same family of floating
-/// surfaces, but not its scrim — the gesture is over in under a second, and
-/// dimming the window the user is switching *within* hides the very thing
-/// they are choosing between.
+/// glass material (`glassPanelBackground`) so the two read as the same family
+/// of floating surfaces, but not its border-and-shadow layer — which in this
+/// standalone panel read as a dark ring — nor its scrim: the gesture is over
+/// in under a second, and dimming the window the user is switching *within*
+/// hides the very thing they are choosing between.
 ///
-/// The panel takes the pointer: hovering a card moves the selection, clicking
-/// one commits to it. A press anywhere OUTSIDE the panel cancels the gesture
-/// (backported from our implementation; upstream let it fall through to the
-/// terminal underneath) — the layer catching those presses is nearly
-/// transparent rather than clear so it still hit-tests, and hidden from
-/// accessibility. Note that a click here is necessarily a *modifier*-click,
-/// since releasing the modifier is what ends the gesture.
+/// The strip takes the pointer: hovering a card moves the selection, clicking
+/// one commits to it, and a press anywhere outside the panel cancels the
+/// gesture (and is swallowed, so it doesn't also reach the terminal). Note
+/// that a click here is necessarily a *modifier*-click, since releasing the
+/// modifier is what ends the gesture.
 ///
 /// With the strip up, cycling moves the selection only — the tab behind it and
 /// the pane holding focus stay put until the modifier is released (see
@@ -41,32 +40,27 @@ struct TabSwitcherOverlay: View {
     var body: some View {
         if let workspace = activeWorkspace, appState.tabCycleTabIDs.count > 1 {
             let entries = tabs(in: workspace)
-            GeometryReader { geo in
-                ZStack {
-                    Color.black.opacity(0.001)
-                        .contentShape(Rectangle())
-                        .onTapGesture { appState.cancelTabCycle() }
-                        .accessibilityHidden(true)
-                    TabSwitcherStrip(
-                        entries: entries,
-                        selection: appState.tabCycleSelection,
-                        availableWidth: geo.size.width,
-                        onHover: { appState.focusTabCycle(at: $0) },
-                        onClick: { index in
-                            guard let projectID = appState.activeProjectID else { return }
-                            appState.commitTabCycle(projectID: projectID, at: index)
-                        }
-                    )
-                    .glassPanel(shadow: .theme)
-                }
-                // Centered: the strip is the whole interface for the gesture
-                // (the window behind it does not change until release), so it
-                // belongs where the eye already is rather than tucked at an
-                // edge — and centering is also what makes it a plausible
-                // pointer target.
-                .frame(width: geo.size.width, height: geo.size.height)
-            }
-            .transition(.opacity)
+            TabSwitcherPanelPresenter(
+                // The strip renders in its own NSHostingView — a NEW SwiftUI
+                // root — and environment values do not travel with a view
+                // VALUE, only down a rendered tree. Without re-injecting
+                // AppState here, PaneMosaicLeaf's `@Environment(AppState.self)`
+                // finds nothing and the hosting view crashes the app on its
+                // first layout (the same reason HorizontalTabBar re-injects
+                // its stores into ArrowlessPopover content).
+                content: TabSwitcherStrip(
+                    entries: entries,
+                    selection: appState.tabCycleSelection,
+                    onHover: { appState.focusTabCycle(at: $0) },
+                    onClick: { index in
+                        guard let projectID = appState.activeProjectID else { return }
+                        appState.commitTabCycle(projectID: projectID, at: index)
+                    }
+                )
+                .environment(appState),
+                contentWidth: TabSwitcherStrip.width(for: entries.count),
+                onCancel: { appState.cancelTabCycle() }
+            )
         }
     }
 
@@ -87,64 +81,264 @@ struct TabSwitcherOverlay: View {
     }
 }
 
+// MARK: - Floating panel
+
+/// Presents the strip in its own borderless panel, centered on the terminal
+/// window.
+///
+/// The separate window is the point: an NSWindow only ever shows content
+/// inside its own frame, so a strip wider than the terminal window — many
+/// candidates, or a narrow window — mounted as an in-window overlay would be
+/// clipped by the window it floats over. In its own window it extends past
+/// the terminal's edges, clamped only by the screen (the way Arc's tab
+/// switcher overflows its window).
+///
+/// The panel never becomes key: the terminal window keeps keyboard focus for
+/// the whole gesture, so the modifier-release commit and the Escape cancel
+/// keep flowing through the app's normal key routing while the strip is up.
+/// A click outside the panel cancels the gesture and is swallowed — a stray
+/// press during a sub-second gesture should dismiss the switcher, not reach
+/// through it into the terminal. (Clicks on other apps' windows never reach
+/// this monitor, so those leave the gesture to end on its own terms.)
+private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
+    let content: Content
+    /// The strip's computed width (see `TabSwitcherStrip.width(for:)`). The
+    /// panel's height is MEASURED from the laid-out content in `present` —
+    /// the width has to come from constants because the hosting view needs a
+    /// width proposal before its layout exists to measure.
+    let contentWidth: CGFloat
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        let coordinator = context.coordinator
+        // `updateNSView` can run before SwiftUI inserts the view into the
+        // window's hierarchy, when there is no window to center on yet —
+        // retry the presentation once one exists.
+        view.onWindowAttached = { [weak coordinator, weak view] in
+            guard let coordinator, let view else { return }
+            coordinator.retryPresentation(anchorView: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ anchorView: AnchorView, context: Context) {
+        context.coordinator.update(
+            anchorView: anchorView,
+            content: content,
+            contentWidth: contentWidth,
+            onCancel: onCancel
+        )
+    }
+
+    static func dismantleNSView(_ nsView: AnchorView, coordinator: Coordinator) {
+        _ = nsView
+        coordinator.dismiss()
+    }
+
+    @MainActor
+    final class Coordinator {
+        private var panel: TabSwitcherPanel?
+        private var hostingView: NSHostingView<Content>?
+        private var outsideClickMonitor: Any?
+        private var onCancel: (() -> Void)?
+        /// The latest content and width, kept so the window-attached retry can
+        /// present them: `updateNSView` routinely runs BEFORE SwiftUI inserts
+        /// the anchor into the window, when there is no window to center on
+        /// yet — and without this the first press of the gesture presented
+        /// nothing, leaving the switcher to appear only on the second press.
+        private var content: Content?
+        private var contentWidth: CGFloat?
+
+        func update(
+            anchorView: NSView,
+            content: Content,
+            contentWidth: CGFloat,
+            onCancel: @escaping () -> Void
+        ) {
+            self.content = content
+            self.contentWidth = contentWidth
+            self.onCancel = onCancel
+            guard let window = anchorView.window else { return }
+            present(content, contentWidth: contentWidth, centeredOn: window)
+        }
+
+        /// The `makeNSView` retry path: the anchor landed in a window after
+        /// the last `update` found none.
+        func retryPresentation(anchorView: NSView) {
+            guard let content, let contentWidth, let window = anchorView.window else { return }
+            present(content, contentWidth: contentWidth, centeredOn: window)
+        }
+
+        private func present(_ content: Content, contentWidth: CGFloat, centeredOn window: NSWindow) {
+            let panel = self.panel ?? makePanel()
+            let hostingView = self.hostingView ?? NSHostingView(rootView: content)
+            hostingView.rootView = content
+            // Width proposed from constants, height measured after a layout
+            // pass with that width in place — the ArrowlessPopoverPresenter
+            // pattern. Measuring without the width proposal was the earlier
+            // bug: glass-backed content answers a near-zero intrinsic size,
+            // so the panel came up invisible on the first press.
+            hostingView.frame.size.width = contentWidth
+            hostingView.layoutSubtreeIfNeeded()
+            let size = NSSize(width: contentWidth, height: max(1, hostingView.fittingSize.height))
+            hostingView.frame = NSRect(origin: .zero, size: size)
+            panel.contentView = hostingView
+            panel.setContentSize(size)
+            panel.setFrameOrigin(Self.centeredOrigin(size: size, in: window))
+            self.panel = panel
+            self.hostingView = hostingView
+
+            guard !panel.isVisible else { return }
+            installOutsideClickMonitor(panel: panel)
+            panel.alphaValue = 0
+            panel.orderFront(nil)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.10
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().alphaValue = 1
+            }
+        }
+
+        func dismiss() {
+            if let outsideClickMonitor {
+                NSEvent.removeMonitor(outsideClickMonitor)
+            }
+            outsideClickMonitor = nil
+            panel?.orderOut(nil)
+            panel = nil
+            hostingView = nil
+            onCancel = nil
+        }
+
+        private func makePanel() -> TabSwitcherPanel {
+            let panel = TabSwitcherPanel(
+                contentRect: .zero,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: true
+            )
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            // The window shadow IS the container's depth. A SwiftUI shadow
+            // can't do this job: the window is exactly content-sized, so it
+            // would clip at the window bounds (a straight cut through the
+            // shadow band), and enlarging the window to give it room would
+            // leave a dead transparent frame that swallows clicks. The
+            // window-server shadow draws OUTSIDE the window, following the
+            // glass's rounded shape — the way every borderless HUD
+            // (Spotlight, the App Switcher) gets its lift. Deliberately not
+            // ArrowlessPopoverPanel's macOS 26 `hasShadow = false`: that
+            // popover is anchored to the tab bar, where the glass's own edge
+            // plus the proximity already read as elevation, while this strip
+            // floats mid-window over terminal content and reads pasted-on
+            // without a shadow.
+            panel.hasShadow = true
+            panel.level = .floating
+            panel.isMovable = false
+            panel.animationBehavior = .none
+            // NOT `.transient`: that makes the window vanish the moment the
+            // app deactivates, which can happen DURING the gesture (an
+            // overlapping app activating, or an automation tool fronting
+            // something else) — the strip would blink out from under a still
+            // held modifier and the release would commit blind. The overlay's
+            // own dismissal paths (modifier release, Escape, outside click,
+            // project switch) already own its lifetime.
+            panel.collectionBehavior = [.fullScreenAuxiliary]
+            return panel
+        }
+
+        /// Center the panel on the terminal window, clamped to the screen's
+        /// visible frame — the window's edges are no longer the boundary, but
+        /// the screen's still are. A strip wider than the screen pins left and
+        /// loses its right end rather than centering off-screen on both.
+        private static func centeredOrigin(size: NSSize, in window: NSWindow) -> NSPoint {
+            let frame = window.frame
+            var origin = NSPoint(
+                x: frame.midX - size.width / 2,
+                y: frame.midY - size.height / 2
+            )
+            let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
+            origin.x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - size.width))
+            origin.y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - size.height))
+            return origin
+        }
+
+        private func installOutsideClickMonitor(panel: TabSwitcherPanel) {
+            outsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                // Clicks on the panel itself reach the cards; anything else
+                // the app would deliver cancels the gesture and is swallowed.
+                guard event.window !== panel else { return event }
+                self?.onCancel?()
+                return nil
+            }
+        }
+    }
+}
+
+/// Mount point that reports when it actually lands in a window (see
+/// `TabSwitcherPanelPresenter.makeNSView`).
+private final class AnchorView: NSView {
+    var onWindowAttached: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { onWindowAttached?() }
+    }
+}
+
+/// The strip's borderless window. Never key, so the terminal window keeps
+/// keyboard focus for the whole gesture.
+private final class TabSwitcherPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 // MARK: - Strip
 
-/// The cards themselves — a fixed-width viewport onto the cycle order, scrolled
-/// to keep the selection centered, with a slice of the neighbouring card
-/// showing at each edge that has more behind it.
+/// The cards themselves — the whole cycle order in one fixed row, sized by
+/// its content and centered on the window (Arc-style).
 ///
-/// A viewport rather than a scroll view: the gesture is keyboard-only and lasts
-/// under a second, so there is nothing to scroll *with*, and a strip that grew
-/// with the tab count would run past the window on a project with a dozen tabs
-/// (measured: five cards already overflowed a 948pt window edge to edge). How
-/// many fit is asked of the window rather than hardcoded, so a wide window
-/// shows more of the order and a narrow one still shows a readable card.
+/// Not a viewport and not a scroll view: the panel's width is the content's
+/// width, full stop. The strip lives in its own borderless window (see
+/// `TabSwitcherPanelPresenter`), so a row wider than the terminal window
+/// extends past the window's edges instead of being clipped by them —
+/// clamped only by the screen. Sliding the row under a clip as the selection
+/// moved read as horizontal scrolling, and reflowing the card size changed
+/// the panel's width mid-gesture; symmetric overflow is the better failure.
 private struct TabSwitcherStrip: View {
     let entries: [TabSwitcherEntry]
     let selection: Int
-    let availableWidth: CGFloat
     /// Pointer handlers, both taking a card's index in the cycle order.
     let onHover: (Int) -> Void
     let onClick: (Int) -> Void
 
     private static let spacing: CGFloat = 10
-    /// Inset from the panel's edge to the cards (ours — upstream used 14; the
-    /// card's own padding carries the rest of the gap, so the edge-to-picture
-    /// distance is this plus `TabSwitcherCard.cardPadding`, equally on every
-    /// side). Anything that pads one axis and not the other shows up
+    /// Inset from the panel's edge to the cards. The card's own padding
+    /// carries the rest of the gap, so the distance the eye reads — panel
+    /// edge to picture — is this plus `TabSwitcherCard.cardPadding`, equally
+    /// on every side. Anything that pads one axis and not the other shows up
     /// immediately here: the card used to carry a stray `.padding(.vertical, 2)`
     /// (left over from a uniform padding that was removed around it), which
     /// made the top gap 20 against 18 at the sides.
-    private static let insets: CGFloat = 8
-    /// Left clear on both sides of the panel, so it reads as floating in the
-    /// window rather than spanning it.
-    private static let windowMargin: CGFloat = 48
-    /// Width reserved on a side that has more tabs behind it, so a slice of
-    /// the next card shows through the clip. That sliver IS the overflow
-    /// indicator — a chevron and a count said the same thing in a second
-    /// visual language, when the strip can just show you the thing itself.
-    /// Its own width plus the gap before it, so `peek - spacing` of card
-    /// stays visible.
-    private static let peek: CGFloat = 34
+    private static let insets: CGFloat = 14
+
+    /// The strip's exact width for `entryCount` cards — computed, because the
+    /// row is fully determined by its constants. The HEIGHT is not computed:
+    /// it is measured with a width proposal (`layoutSubtreeIfNeeded` then
+    /// `fittingSize.height`, the `ArrowlessPopoverPresenter` pattern), which
+    /// is the only reliable way through a hosting view — glass-backed content
+    /// reports a near-zero intrinsic size when asked without one.
+    static func width(for entryCount: Int) -> CGFloat {
+        let cards = CGFloat(max(entryCount, 1))
+        return cards * TabSwitcherCard.cardWidth + (cards - 1) * spacing + insets * 2
+    }
 
     var body: some View {
-        let cardWidth = TabSwitcherCard.cardWidth
-        let capacity = capacity(for: availableWidth, cardWidth: cardWidth)
-        let step = cardWidth + Self.spacing
-        let content = span(of: entries.count, cardWidth: cardWidth)
-        // The viewport is `capacity` whole cards plus a peek on each side, and
-        // it does NOT change as the strip moves: the panel keeping a constant
-        // width is the point. An earlier cut added each peek only when that
-        // side had something behind it, so the panel visibly grew and shrank
-        // as the selection passed the ends.
-        let viewport = min(content, span(of: capacity, cardWidth: cardWidth) + Self.peek * 2)
-        let scroll = scrollOffset(step: step, cardWidth: cardWidth, viewport: viewport, content: content)
-        // Every card is laid out, always, and the whole row is TRANSLATED
-        // under the clip. Rendering only a windowed slice instead meant a step
-        // inserted one view and removed another, so the cards already on
-        // screen slid while the incoming one appeared out of nothing at the
-        // edge. Sliding the strip makes one motion of it: everything moves
-        // together and the next card comes in from under the clip.
         HStack(spacing: Self.spacing) {
             ForEach(entries, id: \.tab.id) { entry in
                 TabSwitcherCard(
@@ -152,44 +346,19 @@ private struct TabSwitcherStrip: View {
                     number: entry.number,
                     isSelected: entry.index == selection
                 )
-                // `.clipped()` below clips hit testing too, so a card in the
-                // peek slots only answers the pointer over its visible sliver.
                 .onHover { if $0 { onHover(entry.index) } }
                 .onTapGesture { onClick(entry.index) }
             }
         }
-        .offset(x: -scroll)
-        .frame(width: viewport, alignment: .leading)
-        .clipped()
         .padding(Self.insets)
-        .animation(.easeOut(duration: 0.16), value: scroll)
-    }
-
-    /// Width of `count` cards laid out with the strip's spacing.
-    private func span(of count: Int, cardWidth: CGFloat) -> CGFloat {
-        guard count > 0 else { return 0 }
-        return cardWidth * CGFloat(count) + Self.spacing * CGFloat(count - 1)
-    }
-
-    /// How far the row is scrolled: the selected card centered in the
-    /// viewport, clamped to the ends. Clamping is what fills the peek slots
-    /// with real cards at the ends instead of leaving empty panel there, and
-    /// it is stateless — the same selection always yields the same offset, so
-    /// nothing drifts across a gesture.
-    private func scrollOffset(step: CGFloat, cardWidth: CGFloat, viewport: CGFloat, content: CGFloat) -> CGFloat {
-        guard let position = entries.firstIndex(where: { $0.index == selection }) else { return 0 }
-        let centered = CGFloat(position) * step + cardWidth / 2 - viewport / 2
-        return min(max(0, centered), max(0, content - viewport))
-    }
-
-    /// How many cards fit, at least one. Both peeks are reserved whether or
-    /// not a neighbour is showing in them, so the capacity — and the panel's
-    /// width — can't change as the strip moves.
-    private func capacity(for width: CGFloat, cardWidth: CGFloat) -> Int {
-        let chrome = Self.windowMargin * 2 + Self.insets * 2 + Self.peek * 2
-        let perCard = cardWidth + Self.spacing
-        let fits = Int(((width - chrome + Self.spacing) / perCard).rounded(.down))
-        return max(1, min(entries.count, fits))
+        // Bare glass, no stroke: the glass draws its own adaptive edge, and
+        // the hairline border of `glassPanel` (the palette's recipe) stacked
+        // on it read, in this standalone panel, as a dark ring around the
+        // strip. The drop shadow is deliberately not here either — the window
+        // is exactly content-sized, so a SwiftUI shadow would clip at its
+        // bounds; the panel's WINDOW shadow provides the depth instead (see
+        // `makePanel`).
+        .glassPanelBackground(cornerRadius: GlassPanelMetrics.cornerRadius)
     }
 }
 
@@ -203,18 +372,15 @@ private struct TabSwitcherCard: View {
     let number: Int
     let isSelected: Bool
 
-    /// Fixed card metrics, backported from our implementation: one card shape
-    /// at every window and pane aspect. Upstream shaped each card by the live
-    /// pane-container aspect so leaves kept their real proportions, but that
-    /// made the strip's whole geometry — card width, panel width, capacity —
-    /// a function of the window shape, and a tall window produced tall
-    /// narrow cards next to a title row that never needed the room. Fixed
-    /// metrics keep `PaneMosaic`'s ratio-driven layout (relative proportions
-    /// are preserved) while the captured frames letterbox `.fit` inside their
-    /// leaves instead of dictating the card. Internal for the strip's
-    /// span/capacity math.
-    static let cardWidth: CGFloat = 202
-    private static let previewHeight: CGFloat = 112
+    /// One card shape at every window and pane aspect: fixed width, with the
+    /// preview carrying a fixed 16:10 proportion (a screen-like shape — the
+    /// same one this strip assumed before it could be measured at all).
+    /// Nothing about the strip's geometry depends on the window, so the
+    /// panel's width never changes mid-gesture. `PaneMosaic` still lays its
+    /// leaves out by the split's real ratios; captured frames letterbox
+    /// `.fit` inside their leaves instead of dictating the card.
+    static let cardWidth: CGFloat = 160
+    private static let previewAspect: CGFloat = 16.0 / 10.0
     /// Padding inside the card, around the preview and the title row. With the
     /// full-card selection fill (below) this is also the fill's inset from the
     /// card's rounded edge, so the selected card reads as one surface behind
@@ -223,11 +389,13 @@ private struct TabSwitcherCard: View {
     private static let previewCornerRadius: CGFloat = 8
     private static let cardCornerRadius: CGFloat = 10
 
-    /// The preview area: the card minus its padding. Exactly this wide, so
-    /// the title row can ask for the same width and nothing in the card is
-    /// wider than its content — the #347 uniform-padding invariant.
+    /// The preview area: the card minus its padding, at the fixed aspect.
+    /// Exactly this wide, so the title row can ask for the same width and
+    /// nothing in the card is wider than its content — the #347
+    /// uniform-padding invariant.
     private static var previewSize: CGSize {
-        CGSize(width: cardWidth - cardPadding * 2, height: previewHeight)
+        let width = cardWidth - cardPadding * 2
+        return CGSize(width: width, height: width / previewAspect)
     }
 
     private var paneCount: Int { tab.splitRoot.allPanes().count }
@@ -254,8 +422,7 @@ private struct TabSwitcherCard: View {
                 )
                 // The preview floats a little over the card — and over the
                 // selection fill behind it — so a card reads as stacked
-                // content rather than printed flat on the panel. Backported
-                // from our implementation.
+                // content rather than printed flat on the panel.
                 .shadow(color: .black.opacity(0.24), radius: 5, x: 0, y: 2)
 
             HStack(spacing: 6) {
@@ -284,10 +451,10 @@ private struct TabSwitcherCard: View {
         }
         .padding(Self.cardPadding)
         // The selection fills the WHOLE card — preview and title row together,
-        // in `surface` — rather than a halo hugging the preview. Backported
-        // from our implementation: with the icon, title and picture all inside
-        // one surface, the selected card reads as a single chosen thing rather
-        // than a highlighted picture with an unhighlighted caption.
+        // in `surface` — rather than a halo hugging the preview: with the
+        // icon, title and picture all inside one surface, the selected card
+        // reads as a single chosen thing rather than a highlighted picture
+        // with an unhighlighted caption.
         .background(
             RoundedRectangle(cornerRadius: Self.cardCornerRadius, style: .continuous)
                 .fill(isSelected ? MactermTheme.surface : .clear)
@@ -297,9 +464,9 @@ private struct TabSwitcherCard: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    /// One spoken label for the whole card (backported from our
-    /// implementation): number, title, execution state, working directory and
-    /// pane count, so VoiceOver users get everything the picture shows.
+    /// One spoken label for the whole card: number, title, execution state,
+    /// working directory and pane count, so VoiceOver users get everything
+    /// the picture shows.
     private var accessibilityLabel: String {
         [
             "Tab \(number)",
