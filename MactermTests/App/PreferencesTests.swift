@@ -11,13 +11,13 @@ import Testing
 @MainActor
 struct PreferencesTests {
     @Test
-    func recent_tab_switcher_defaults_off_and_round_trips() {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
+    func tab_switcher_overlay_defaults_on_and_round_trips() {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
 
-        #expect(!Preferences.shared.showRecentTabSwitcher)
-        Preferences.shared.showRecentTabSwitcher = true
-        #expect(Preferences.defaults.bool(forKey: Preferences.Keys.showRecentTabSwitcher))
+        #expect(Preferences.shared.showTabSwitcherOverlay)
+        Preferences.shared.showTabSwitcherOverlay = false
+        #expect(!Preferences.defaults.bool(forKey: Preferences.Keys.showTabSwitcherOverlay))
     }
 
     @Test

@@ -309,6 +309,16 @@ final class Preferences {
         didSet { defaults.set(showTabStatusIndicator, forKey: Keys.showTabStatusIndicator) }
     }
 
+    /// Show a transient tab switcher while the Recent Tab shortcut is held
+    /// (#344): a glass strip of the recency-ordered tabs with a preview of
+    /// each pane, so a several-tab project shows where the next Ctrl+Tab will
+    /// land. On by default. Off keeps the plain direct-cycling behavior —
+    /// where each press switches tabs for real rather than moving a selection
+    /// — and skips the pane snapshots entirely, so it costs nothing there.
+    var showTabSwitcherOverlay: Bool {
+        didSet { defaults.set(showTabSwitcherOverlay, forKey: Keys.showTabSwitcherOverlay) }
+    }
+
     /// Whether the running spinner also replaces an AI agent's logo (#225).
     /// Off keeps the agent logo while the agent works — agent CLIs draw their
     /// own busy indicator in the tab title, so the spinner is redundant there —
@@ -329,9 +339,11 @@ final class Preferences {
         didSet { defaults.set(autoNameTabs, forKey: Keys.autoNameTabs) }
     }
 
-    /// Off by default to preserve the existing Ctrl+Tab behavior.
-    var showRecentTabSwitcher: Bool {
-        didSet { defaults.set(showRecentTabSwitcher, forKey: Keys.showRecentTabSwitcher) }
+    /// Give each new project a color tag. Off by default, and consulted at
+    /// creation only — flipping it neither tags existing projects nor clears
+    /// tags already set.
+    var autoAssignProjectColors: Bool {
+        didSet { defaults.set(autoAssignProjectColors, forKey: Keys.autoAssignProjectColors) }
     }
 
     var showNewProjectButton: Bool {
@@ -821,9 +833,10 @@ final class Preferences {
             .flatMap(SidebarIconSize.init(rawValue:)) ?? .medium
         showAgentIcons = defaults.object(forKey: Keys.showAgentIcons) as? Bool ?? true
         showTabStatusIndicator = defaults.object(forKey: Keys.showTabStatusIndicator) as? Bool ?? false
+        showTabSwitcherOverlay = defaults.object(forKey: Keys.showTabSwitcherOverlay) as? Bool ?? true
         showSpinnerOverAgentIcons = defaults.object(forKey: Keys.showSpinnerOverAgentIcons) as? Bool ?? true
         autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
-        showRecentTabSwitcher = defaults.object(forKey: Keys.showRecentTabSwitcher) as? Bool ?? false
+        autoAssignProjectColors = defaults.object(forKey: Keys.autoAssignProjectColors) as? Bool ?? false
         showNewProjectButton = defaults.object(forKey: Keys.showNewProjectButton) as? Bool ?? true
         backgroundSSHConnections = defaults.object(forKey: Keys.backgroundSSHConnections) as? Bool ?? true
         reconnectRemotePanes = defaults.object(forKey: Keys.reconnectRemotePanes) as? Bool ?? true
@@ -952,9 +965,10 @@ final class Preferences {
         static let sidebarIconSize = "macterm.sidebar.iconSize"
         static let showAgentIcons = "macterm.sidebar.showAgentIcons"
         static let showTabStatusIndicator = "macterm.sidebar.showTabStatusIndicator"
+        static let showTabSwitcherOverlay = "macterm.tabSwitcher.overlay"
         static let showSpinnerOverAgentIcons = "macterm.sidebar.showSpinnerOverAgentIcons"
         static let autoNameTabs = "macterm.tabs.autoName"
-        static let showRecentTabSwitcher = "macterm.tabs.showRecentTabSwitcher"
+        static let autoAssignProjectColors = "macterm.projects.autoAssignColors"
         static let showNewProjectButton = "macterm.sidebar.showNewProjectButton"
         static let backgroundSSHConnections = "macterm.remote.backgroundSSHConnections"
         static let reconnectRemotePanes = "macterm.remote.reconnectDroppedPanes"

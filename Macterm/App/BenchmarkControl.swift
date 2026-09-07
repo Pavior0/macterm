@@ -14,13 +14,6 @@ private let logger = Logger(subsystem: appBundleID, category: "BenchmarkControl"
 /// permission database.
 @MainActor
 enum BenchmarkControl {
-    struct RecentTabPreviewCounts {
-        let panes: Int
-        let images: Int
-        let placeholders: Int
-        let unavailable: Int
-    }
-
     static let isEnabled = ProcessInfo.processInfo.environment["MACTERM_BENCHMARK"] == "1"
 
     // Strong references are fine here: both objects live for the app's
@@ -53,9 +46,6 @@ enum BenchmarkControl {
     /// timer/render/wakeup behavior, not the OS's nap throttling masking a
     /// regression.
     private static var activity: NSObjectProtocol?
-    private(set) static var recentTabPreviewMetrics: ControlRecentTabPreviewMetrics?
-    private static var recentTabPreviewGeneration = 0
-
     private enum Command: String, CaseIterable {
         case openProject = "open-project"
         case activate
@@ -63,7 +53,6 @@ enum BenchmarkControl {
         case restore
         case recentTabCycle = "recent-tab-cycle"
         case recentTabCommit = "recent-tab-commit"
-        case recentTabCancel = "recent-tab-cancel"
     }
 
     static func install() {
@@ -129,31 +118,11 @@ enum BenchmarkControl {
             mainWindow?.makeKeyAndOrderFront(nil)
         case .recentTabCycle:
             guard let appState, let projectID = appState.activeProjectID else { return }
-            recentTabPreviewGeneration += 1
-            recentTabPreviewMetrics = nil
             appState.cycleRecentTabForAutomation(projectID: projectID)
         case .recentTabCommit:
-            appState?.commitRecentTabCycle()
-        case .recentTabCancel:
-            appState?.cancelRecentTabCycle()
+            guard let appState, let projectID = appState.activeProjectID else { return }
+            appState.commitTabCycle(projectID: projectID)
         }
-    }
-
-    static func recordRecentTabPreviewMetrics(
-        totalMilliseconds: Double,
-        maximumCaptureMilliseconds: Double,
-        counts: RecentTabPreviewCounts
-    ) {
-        guard isEnabled else { return }
-        recentTabPreviewMetrics = ControlRecentTabPreviewMetrics(
-            generation: recentTabPreviewGeneration,
-            totalMilliseconds: totalMilliseconds,
-            maximumCaptureMilliseconds: maximumCaptureMilliseconds,
-            paneCount: counts.panes,
-            imageCount: counts.images,
-            placeholderCount: counts.placeholders,
-            unavailableCount: counts.unavailable
-        )
     }
 
     /// Select (creating if needed) a project at `MACTERM_BENCHMARK_DIR` (or

@@ -82,10 +82,10 @@ struct AppStateTests {
     }
 
     @Test
-    func recent_tab_switcher_defers_selection_commits_mru_and_cancels() throws {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
-        Preferences.shared.showRecentTabSwitcher = true
+    func recent_tab_cycle_defers_selection_and_commits_mru() throws {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
+        Preferences.shared.showTabSwitcherOverlay = true
 
         let state = makeAppState()
         let project = seedProject(state)
@@ -97,27 +97,24 @@ struct AppStateTests {
         let currentID = try #require(workspace.activeTabID)
 
         state.cycleRecentTab(projectID: project.id)
-        #expect(state.recentTabCycle?.selectedTabID == recentID)
+        #expect(state.tabCycleTabIDs[state.tabCycleSelection] == recentID)
         #expect(workspace.activeTabID == currentID)
 
         state.cycleRecentTab(projectID: project.id)
-        #expect(state.recentTabCycle?.selectedTabID == originalID)
+        #expect(state.tabCycleTabIDs[state.tabCycleSelection] == originalID)
         #expect(workspace.activeTabID == currentID)
-        state.cancelRecentTabCycle()
-        #expect(workspace.activeTabID == currentID)
+
+        state.commitTabCycle(projectID: project.id)
+        #expect(workspace.activeTabID == originalID)
         #expect(!state.isTabCycling)
-
-        state.cycleRecentTab(projectID: project.id)
-        state.commitRecentTabCycle()
-        #expect(workspace.activeTabID == recentID)
-        #expect(workspace.recencyOrder().prefix(2).elementsEqual([recentID, currentID]))
+        #expect(workspace.recencyOrder().prefix(2).elementsEqual([originalID, currentID]))
     }
 
     @Test
-    func recent_tab_switcher_pointer_highlight_defers_until_click_or_release() throws {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
-        Preferences.shared.showRecentTabSwitcher = true
+    func recent_tab_cycle_pointer_focus_defers_until_click_or_release() throws {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
+        Preferences.shared.showTabSwitcherOverlay = true
 
         let state = makeAppState()
         let project = seedProject(state)
@@ -128,38 +125,23 @@ struct AppStateTests {
         let currentID = try #require(workspace.activeTabID)
 
         state.cycleRecentTab(projectID: project.id)
-        state.highlightRecentTab(oldestID)
-
-        #expect(state.recentTabCycle?.selectedTabID == oldestID)
+        // Hovering a card moves the selection only — the tab behind it stays
+        // put until the gesture commits.
+        state.focusTabCycle(at: 2)
+        #expect(state.tabCycleTabIDs[state.tabCycleSelection] == oldestID)
         #expect(workspace.activeTabID == currentID)
 
-        state.commitRecentTabCycle()
+        // Clicking a card commits straight to it.
+        state.commitTabCycle(projectID: project.id, at: 2)
         #expect(workspace.activeTabID == oldestID)
+        #expect(!state.isTabCycling)
     }
 
     @Test
-    func recent_tab_switcher_limits_candidates_to_five_most_recent_tabs() throws {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
-        Preferences.shared.showRecentTabSwitcher = true
-
-        let state = makeAppState()
-        let project = seedProject(state)
-        let workspace = try #require(state.workspaces[project.id])
-        for _ in 0 ..< 6 {
-            state.createTab(projectID: project.id, projects: [project])
-        }
-
-        state.cycleRecentTab(projectID: project.id)
-
-        #expect(state.recentTabCycle?.tabIDs == Array(workspace.recencyOrder().prefix(5)))
-    }
-
-    @Test
-    func recent_tab_direct_mode_previews_restores_and_commits_mru() throws {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
-        Preferences.shared.showRecentTabSwitcher = false
+    func recent_tab_direct_mode_peeks_and_commits_mru() throws {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
+        Preferences.shared.showTabSwitcherOverlay = false
 
         let state = makeAppState()
         let project = seedProject(state)
@@ -168,46 +150,22 @@ struct AppStateTests {
         state.createTab(projectID: project.id, projects: [project])
         let currentID = try #require(workspace.activeTabID)
 
+        // Without the switcher there is nothing else to look at, so each
+        // press peeks the tab for real.
         state.cycleRecentTab(projectID: project.id)
         #expect(workspace.activeTabID == recentID)
-        state.cancelRecentTabCycle()
-        #expect(workspace.activeTabID == currentID)
 
-        state.cycleRecentTab(projectID: project.id)
-        state.commitRecentTabCycle()
+        state.commitTabCycle(projectID: project.id)
         #expect(workspace.activeTabID == recentID)
+        #expect(!state.isTabCycling)
         #expect(workspace.recencyOrder().prefix(2).elementsEqual([recentID, currentID]))
     }
 
     @Test
-    func changing_projects_cancels_a_direct_recent_tab_preview() throws {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
-        Preferences.shared.showRecentTabSwitcher = false
-
-        let state = makeAppState()
-        let firstProject = seedProject(state, name: "first")
-        let firstWorkspace = try #require(state.workspaces[firstProject.id])
-        let recentID = try #require(firstWorkspace.activeTabID)
-        state.createTab(projectID: firstProject.id, projects: [firstProject])
-        let currentID = try #require(firstWorkspace.activeTabID)
-
-        state.cycleRecentTab(projectID: firstProject.id)
-        #expect(firstWorkspace.activeTabID == recentID)
-
-        let secondProject = Project(name: "second", path: "/tmp", sortOrder: 1)
-        state.selectProject(secondProject)
-
-        #expect(!state.isTabCycling)
-        #expect(firstWorkspace.activeTabID == currentID)
-        #expect(state.activeProjectID == secondProject.id)
-    }
-
-    @Test
-    func recent_tab_commit_cancels_when_the_highlighted_tab_was_closed() throws {
-        let prior = Preferences.shared.showRecentTabSwitcher
-        defer { Preferences.shared.showRecentTabSwitcher = prior }
-        Preferences.shared.showRecentTabSwitcher = true
+    func recent_tab_commit_clears_the_cycle_when_the_highlighted_tab_was_closed() throws {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
+        Preferences.shared.showTabSwitcherOverlay = true
 
         let state = makeAppState()
         let project = seedProject(state)
@@ -217,113 +175,11 @@ struct AppStateTests {
         let currentID = try #require(workspace.activeTabID)
 
         state.cycleRecentTab(projectID: project.id)
-        #expect(state.recentTabCycle?.selectedTabID == recentID)
         state.closeTab(recentID, projectID: project.id)
-        state.commitRecentTabCycle()
+        state.commitTabCycle(projectID: project.id)
 
         #expect(workspace.activeTabID == currentID)
         #expect(!state.isTabCycling)
-    }
-
-    @Test
-    func recent_tab_responder_cancels_on_escape_and_commits_on_modifier_release() throws {
-        let priorPreference = Preferences.shared.showRecentTabSwitcher
-        let priorShortcut = HotkeyRegistry.selectedShortcutString(for: .recentTab)
-        defer {
-            Preferences.shared.showRecentTabSwitcher = priorPreference
-            HotkeyRegistry.setShortcutString(priorShortcut, for: .recentTab)
-        }
-        Preferences.shared.showRecentTabSwitcher = true
-        HotkeyRegistry.setShortcutString("ctrl+tab", for: .recentTab)
-
-        let state = makeAppState()
-        let project = seedProject(state)
-        let workspace = try #require(state.workspaces[project.id])
-        let recentID = try #require(workspace.activeTabID)
-        state.createTab(projectID: project.id, projects: [project])
-        let currentID = try #require(workspace.activeTabID)
-        let storeURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("macterm-responder-projects-\(UUID().uuidString).json")
-        let responder = MainAppResponder(appState: state, projectStore: ProjectStore(fileURL: storeURL))
-        let tab = try #require(NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: .control,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            characters: "\t",
-            charactersIgnoringModifiers: "\t",
-            isARepeat: false,
-            keyCode: 48
-        ))
-        let escape = try #require(NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: .control,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            characters: "\u{1b}",
-            charactersIgnoringModifiers: "\u{1b}",
-            isARepeat: false,
-            keyCode: 53
-        ))
-
-        _ = responder.handle(tab)
-        #expect(state.recentTabCycle?.selectedTabID == recentID)
-        #expect(workspace.activeTabID == currentID)
-        _ = responder.handle(escape)
-        #expect(!state.isTabCycling)
-        #expect(workspace.activeTabID == currentID)
-
-        _ = responder.handle(tab)
-        responder.handleModifierFlagsChanged([])
-        #expect(!state.isTabCycling)
-        #expect(workspace.activeTabID == recentID)
-    }
-
-    @Test
-    func recent_tab_menu_shortcut_defers_while_menu_invocation_commits() throws {
-        let priorPreference = Preferences.shared.showRecentTabSwitcher
-        let priorShortcut = HotkeyRegistry.selectedShortcutString(for: .recentTab)
-        defer {
-            Preferences.shared.showRecentTabSwitcher = priorPreference
-            HotkeyRegistry.setShortcutString(priorShortcut, for: .recentTab)
-        }
-        Preferences.shared.showRecentTabSwitcher = true
-        HotkeyRegistry.setShortcutString("ctrl+tab", for: .recentTab)
-
-        let state = makeAppState()
-        let project = seedProject(state)
-        let workspace = try #require(state.workspaces[project.id])
-        let recentID = try #require(workspace.activeTabID)
-        state.createTab(projectID: project.id, projects: [project])
-        let currentID = try #require(workspace.activeTabID)
-        let storeURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("macterm-menu-projects-\(UUID().uuidString).json")
-        let context = AppCommandContext(appState: state, projectStore: ProjectStore(fileURL: storeURL))
-        let tab = try #require(NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: .control,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            characters: "\t",
-            charactersIgnoringModifiers: "\t",
-            isARepeat: false,
-            keyCode: 48
-        ))
-
-        AppCommand.recentTab.performMenuAction(in: context, event: tab)
-        #expect(state.recentTabCycle?.selectedTabID == recentID)
-        #expect(workspace.activeTabID == currentID)
-        state.cancelRecentTabCycle()
-
-        AppCommand.recentTab.performMenuAction(in: context, event: nil)
-        #expect(!state.isTabCycling)
-        #expect(workspace.activeTabID == recentID)
     }
 
     // MARK: - Splits
@@ -337,6 +193,247 @@ struct AppStateTests {
         state.splitPane(direction: .horizontal, projectID: p.id, projects: [p])
         #expect(tab.splitRoot.allPanes().count == 2)
         #expect(tab.focusedPaneID != before)
+    }
+
+    // MARK: - Mirroring (#345)
+
+    @Test
+    func mirrorPane_attaches_a_second_pane_to_the_same_session() throws {
+        // The whole point: two panes, one zmx session. `zmx attach` is an
+        // upsert and its daemon broadcasts to every client, so both render the
+        // same live shell.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        #expect(tab.splitRoot.allPanes().count == 2)
+        #expect(mirrored.sessionName == source.sessionName)
+        #expect(mirrored.sessionID == source.sessionID)
+        // Distinct panes, though — each needs its own surface, because one
+        // NSView cannot live in two view hierarchies.
+        #expect(mirrored.id != source.id)
+    }
+
+    @Test
+    func mirrorPane_does_not_carry_the_sources_command_or_shell() throws {
+        // `command` is injected as initial_input on first surface build, and
+        // hasBuiltSurface is per-Pane — so a mirror carrying it would re-type a
+        // declared layout `run:` into a session already running it.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let withCommand = try #require(state.splitPane(
+            source.id, direction: .horizontal, projectID: p.id, command: "htop"
+        ))
+        let commanded = try #require(tab.splitRoot.findPane(id: withCommand))
+        #expect(commanded.command == "htop")
+
+        let mirrorID = try #require(state.mirrorPane(commanded.id, direction: .vertical, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        #expect(mirrored.command == nil)
+        #expect(mirrored.shell == nil)
+        #expect(mirrored.sessionName == commanded.sessionName)
+    }
+
+    @Test
+    func mirrorPane_does_not_steal_focus() throws {
+        // Unlike split: a mirror is a second view of work the user is already
+        // looking at, so taking focus would move them off the pane they use.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let before = tab.focusedPaneID
+
+        _ = state.mirrorPane(source.id, direction: .horizontal, projectID: p.id)
+
+        #expect(tab.focusedPaneID == before)
+    }
+
+    @Test
+    func mirrorPane_unknown_pane_is_noop() throws {
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+
+        #expect(state.mirrorPane(UUID(), direction: .horizontal, projectID: p.id) == nil)
+        #expect(tab.splitRoot.allPanes().count == 1)
+    }
+
+    @Test
+    func closing_a_mirror_made_by_mirrorPane_spares_the_session() async throws {
+        // The end-to-end shape of #348's refcount, driven through the real
+        // mirror path rather than a hand-built pane.
+        let killed = KilledSessions()
+        let state = makeAppState()
+        state.zmx = recordingZmx(into: killed)
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+
+        state.closePane(mirrorID, projectID: p.id)
+
+        await killed.settleExpectingNone()
+        #expect(await killed.names.isEmpty)
+        #expect(tab.splitRoot.allPanes().count == 1)
+    }
+
+    @Test
+    func an_unmirrored_pane_is_trivially_its_sessions_leader() throws {
+        // It is the session's only client, so there is nothing to lead.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let pane = try #require(tab.splitRoot.allPanes().first)
+
+        #expect(!state.isMirrored(pane))
+        #expect(state.isLeader(pane))
+        #expect(state.nonLeaderPaneIDs(in: tab).isEmpty)
+    }
+
+    @Test
+    func mirroring_leaves_leadership_with_the_source() throws {
+        // zmx's handleInit sets a leader only when there is none, so a second
+        // client attaching leaves the pty size exactly where it was. Our model
+        // has to say the same or the dim would point at the wrong pane.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        #expect(state.isMirrored(source))
+        #expect(state.isLeader(source))
+        #expect(!state.isLeader(mirrored))
+        #expect(state.nonLeaderPaneIDs(in: tab) == [mirrorID])
+    }
+
+    @Test
+    func focusing_a_mirror_hands_it_leadership() throws {
+        // Focus is how the user says "drive the size from here" — and any real
+        // keystroke (which needs focus) makes zmx hand leadership over anyway.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        state.focusPane(mirrorID, projectID: p.id)
+
+        #expect(state.isLeader(mirrored))
+        #expect(!state.isLeader(source))
+        #expect(state.nonLeaderPaneIDs(in: tab) == [source.id])
+
+        // And back again — leadership follows focus, it does not latch.
+        state.focusPane(source.id, projectID: p.id)
+        #expect(state.isLeader(source))
+        #expect(!state.isLeader(mirrored))
+    }
+
+    @Test
+    func leadership_falls_back_to_tree_order_when_unrecorded() throws {
+        // A restored pair attached before we tracked anything. zmx makes the
+        // FIRST client to attach the leader and restore warms in tree order,
+        // so tree order is the best-effort match — and exactly one pane must
+        // come out the leader either way.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let ws = try #require(state.workspaces[p.id])
+        let tab = try #require(ws.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        tab.splitRoot = .split(SplitBranch(
+            direction: .horizontal,
+            first: .pane(source),
+            second: .pane(mirrorPane(of: source.sessionName, projectID: p.id))
+        ))
+
+        let panes = tab.splitRoot.allPanes()
+        #expect(panes.count == 2)
+        #expect(panes.count(where: { state.isLeader($0) }) == 1)
+        #expect(try state.isLeader(#require(panes.first)))
+    }
+
+    @Test
+    func leadership_survives_the_other_mirror_closing() throws {
+        // Once alone, a pane is the only client and so trivially the leader —
+        // it must never stay dimmed after its twin goes away.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        state.focusPane(mirrorID, projectID: p.id)
+        #expect(!state.isLeader(source))
+
+        state.closePane(mirrorID, projectID: p.id)
+
+        #expect(state.isLeader(source))
+        #expect(state.nonLeaderPaneIDs(in: tab).isEmpty)
+    }
+
+    @Test
+    func claiming_leadership_is_a_noop_for_an_unmirrored_pane() throws {
+        // Nothing to claim: the pane is its session's only client, so the
+        // whole mechanism must stay off the hot path of an ordinary focus.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let pane = try #require(tab.splitRoot.allPanes().first)
+
+        state.claimSessionLeadership(pane)
+
+        #expect(state.isLeader(pane))
+        #expect(!state.isMirrored(pane))
+    }
+
+    @Test
+    func claiming_leadership_records_it_immediately() throws {
+        // The model updates now, not after the debounce, so the dim moves with
+        // the click. Only the wire message to zmx is deferred.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+        #expect(state.isLeader(source))
+
+        state.claimSessionLeadership(mirrored)
+
+        #expect(state.isLeader(mirrored))
+        #expect(!state.isLeader(source))
+    }
+
+    @Test
+    func closeNeedsConfirmation_is_false_for_a_pane_whose_session_survives() throws {
+        // The busy-close guard says "closing kills its session". For a mirror
+        // that is simply false — the other view keeps the program running —
+        // so a busy mirror must not raise it.
+        let state = makeAppState()
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        // Closing either one alone leaves the other holding the session.
+        #expect(!state.closeNeedsConfirmation([mirrored]))
+        #expect(!state.closeNeedsConfirmation([source]))
+        // Closing BOTH ends it, so the guard applies again — whatever the
+        // panes' own busy verdict is, the retention half must not veto it.
+        #expect(
+            state.closeNeedsConfirmation([source, mirrored])
+                == [source, mirrored].contains(where: \.needsConfirmClose)
+        )
     }
 
     @Test
@@ -1951,6 +2048,82 @@ struct AppStateTests {
 
         await killed.settle(expecting: names.count)
         #expect(await killed.names == names)
+    }
+
+    /// A pane attached to `name`, for building the mirror cases below. Uses
+    /// the same persisted-name init the restore path uses, which is the only
+    /// way two panes can legitimately share a session name today.
+    private func mirrorPane(of name: String, projectID: UUID) -> Pane {
+        Pane(projectPath: "/tmp", projectID: projectID, sessionName: name)
+    }
+
+    @Test
+    func closing_one_of_two_mirrors_spares_the_shared_session() async throws {
+        // Two panes may attach one zmx session (the same session shown in
+        // another window). Closing one is a release, not a kill — the daemon
+        // has to outlive it, or the work still on screen elsewhere dies.
+        let killed = KilledSessions()
+        let state = makeAppState()
+        state.zmx = recordingZmx(into: killed)
+        let p = seedProject(state)
+        let ws = try #require(state.workspaces[p.id])
+        let tab = try #require(ws.activeTab)
+        let shared = try #require(tab.splitRoot.allPanes().first).sessionName
+
+        let mirrorTab = ws.createTab(projectPath: "/tmp")
+        mirrorTab.splitRoot = .pane(mirrorPane(of: shared, projectID: p.id))
+
+        state.closeTab(mirrorTab.id, projectID: p.id)
+
+        await killed.settleExpectingNone()
+        #expect(await killed.names.isEmpty)
+    }
+
+    @Test
+    func closing_the_last_mirror_kills_the_shared_session() async throws {
+        // The refcount must actually reach zero: with no pane left attached,
+        // the daemon has to die or it lingers as a clients==0 orphan.
+        let killed = KilledSessions()
+        let state = makeAppState()
+        state.zmx = recordingZmx(into: killed)
+        let p = seedProject(state)
+        let ws = try #require(state.workspaces[p.id])
+        let tab = try #require(ws.activeTab)
+        let shared = try #require(tab.splitRoot.allPanes().first).sessionName
+
+        let mirrorTab = ws.createTab(projectPath: "/tmp")
+        mirrorTab.splitRoot = .pane(mirrorPane(of: shared, projectID: p.id))
+        // A third tab so closing both mirror-holding tabs leaves a valid
+        // workspace behind.
+        _ = ws.createTab(projectPath: "/tmp")
+
+        state.closeTab(mirrorTab.id, projectID: p.id)
+        state.closeTab(tab.id, projectID: p.id)
+
+        await killed.settle(expecting: 1)
+        #expect(await killed.names == [shared])
+    }
+
+    @Test
+    func releasing_two_mirrors_in_one_batch_still_kills_the_session() async throws {
+        // The batch case: asked one at a time, two mirrors inside the SAME
+        // batch would each see the other still in the tree, both decline, and
+        // leak the session. This is why releaseSessions takes the whole batch.
+        let killed = KilledSessions()
+        let state = makeAppState()
+        state.zmx = recordingZmx(into: killed)
+        let p = seedProject(state)
+        let ws = try #require(state.workspaces[p.id])
+        let tab = try #require(ws.activeTab)
+        let shared = try #require(tab.splitRoot.allPanes().first).sessionName
+
+        let mirrorTab = ws.createTab(projectPath: "/tmp")
+        mirrorTab.splitRoot = .pane(mirrorPane(of: shared, projectID: p.id))
+
+        state.unloadProject(p.id)
+
+        await killed.settle(expecting: 1)
+        #expect(await killed.names == [shared])
     }
 
     @Test

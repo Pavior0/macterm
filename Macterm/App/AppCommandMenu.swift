@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 /// SwiftUI button for an `AppCommand` in the menu bar. Delegates execution and
@@ -18,7 +17,7 @@ struct AppCommandMenuItem: View {
         let action = command.action(in: ctx)
         let title = titleOverride ?? command.title
         Button(title) {
-            command.performMenuAction(in: ctx, event: NSApp.currentEvent)
+            action?()
         }
         .disabled(action == nil)
         .modifier(KeyboardShortcutForCommand(command: command))

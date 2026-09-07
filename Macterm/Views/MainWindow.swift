@@ -245,8 +245,12 @@ struct MainWindow: View {
                 CommandPaletteOverlay()
             }
         }
+        // Below the palette (the two can't be up together — cycling commits on
+        // modifier release), above the terminal it describes.
         .overlay {
-            RecentTabSwitcherOverlay()
+            if appState.isTabCycling, preferences.showTabSwitcherOverlay {
+                TabSwitcherOverlay()
+            }
         }
         // Above the palette overlay so a toast fired by a palette command isn't
         // covered by the palette's own dismissal animation.
@@ -1047,6 +1051,7 @@ struct WorkspaceView: View {
                 zoomedPaneID: tab.zoomedPaneID,
                 isActiveProject: true,
                 projectID: project.id,
+                nonLeaderPaneIDs: appState.nonLeaderPaneIDs(in: tab),
                 onFocusPane: { appState.focusPane($0, projectID: project.id) },
                 onSplit: { paneID, dir in
                     appState.splitPane(
@@ -1298,20 +1303,6 @@ private struct WindowStyler: NSViewRepresentable {
             syncWindowTopSafeAreaInset(window: window)
             syncInitialSidebarVisibility(window: window)
             swiftuiDelegate?.windowDidBecomeMain?(notification)
-        }
-
-        func windowDidBecomeKey(_ notification: Notification) {
-            if let window = notification.object as? NSWindow {
-                WindowAppearance.syncKeyStatus(window: window)
-            }
-            swiftuiDelegate?.windowDidBecomeKey?(notification)
-        }
-
-        func windowDidResignKey(_ notification: Notification) {
-            if let window = notification.object as? NSWindow {
-                WindowAppearance.syncKeyStatus(window: window)
-            }
-            swiftuiDelegate?.windowDidResignKey?(notification)
         }
 
         func windowDidEnterFullScreen(_ notification: Notification) {

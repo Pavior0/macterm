@@ -9,28 +9,8 @@ struct AppCommandContext {
 }
 
 extension AppCommand {
-    /// Menu key equivalents are handled before KeyRouter's local monitor.
-    /// Recent Tab must begin its hold interaction here when its shortcut fired;
-    /// pointer and menu-navigation invocations stay one-shot.
-    @MainActor
-    func performMenuAction(in ctx: AppCommandContext, event: NSEvent?) {
-        guard self == .recentTab,
-              let event,
-              HotkeyRegistry.matches(event, action: .recentTab),
-              let projectID = ctx.appState.activeProjectID
-        else {
-            action(in: ctx)?()
-            return
-        }
-        ctx.appState.cycleRecentTab(projectID: projectID)
-        if HotkeyRegistry.selectedShortcut(for: .recentTab)?.modifiers.isEmpty == true {
-            ctx.appState.commitRecentTabCycle()
-        }
-    }
-
     /// Returns the command's one-shot action, or nil when it doesn't apply in
-    /// the current context. The palette and pointer-driven menu use this path;
-    /// `performMenuAction` adds the keyboard lifecycle needed by Recent Tab.
+    /// the current context. The palette and pointer-driven menu use this path.
     @MainActor
     func action(in ctx: AppCommandContext) -> (@MainActor () -> Void)? {
         let projectID = ctx.appState.activeProjectID
@@ -71,12 +51,7 @@ extension AppCommand {
             return { ctx.appState.selectPreviousTab(projectID: projectID) }
         case .recentTab:
             guard let projectID else { return nil }
-            // Menu and palette actions have no modifier release, so they
-            // perform one complete cycle.
-            return {
-                ctx.appState.cycleRecentTab(projectID: projectID)
-                ctx.appState.commitRecentTabCycle()
-            }
+            return { ctx.appState.cycleRecentTab(projectID: projectID) }
         case .renameTab:
             guard let projectID,
                   let tab = ctx.appState.workspaces[projectID]?.activeTab

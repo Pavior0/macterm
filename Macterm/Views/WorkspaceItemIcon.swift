@@ -88,16 +88,6 @@ struct WorkspaceItemIcon: View {
     }
 }
 
-private extension SidebarIconSize {
-    var imageScale: Image.Scale {
-        switch self {
-        case .small: .small
-        case .medium: .medium
-        case .large: .large
-        }
-    }
-}
-
 private struct NumberedItemIcon: View {
     let index: Int
     let variant: String

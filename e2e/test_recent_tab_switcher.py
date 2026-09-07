@@ -38,8 +38,7 @@ def test_recent_tab_switcher_state_machine_in_debug_app(app, fresh_tab):
     )
     assert _active_tab_id(app) == current_id
 
-    # Advancing changes only the highlight. Cancel leaves the original
-    # terminal active.
+    # Advancing changes only the highlight; the live terminal still holds.
     notify("recent-tab-cycle")
     wait_for(
         lambda: _switcher_has_selection(app, original_id),
@@ -47,23 +46,28 @@ def test_recent_tab_switcher_state_machine_in_debug_app(app, fresh_tab):
     )
     assert _active_tab_id(app) == current_id
 
-    notify("recent-tab-cancel")
+    # Releasing the shortcut commits exactly the highlighted tab and closes
+    # the switcher.
+    notify("recent-tab-commit")
+    wait_for(
+        lambda: _active_tab_id(app) == original_id,
+        message="Recent Tab release to commit the highlighted tab",
+    )
     wait_for(
         lambda: _switcher_is_hidden(app),
-        message="the Recent Tab switcher to cancel",
+        message="the Recent Tab switcher to close after committing",
     )
-    assert _active_tab_id(app) == current_id
 
-    # A fresh cycle still starts from the same MRU order; committing selects
-    # exactly the highlighted tab.
+    # A fresh cycle starts from the new MRU order: committing Original A made
+    # it the most recent tab, so the first highlight lands on Current C.
     notify("recent-tab-cycle")
     wait_for(
-        lambda: _switcher_has_selection(app, recent_id),
+        lambda: _switcher_has_selection(app, current_id),
         message="a fresh Recent Tab cycle",
     )
     notify("recent-tab-commit")
     wait_for(
-        lambda: _active_tab_id(app) == recent_id,
-        message="Recent Tab release to commit the highlighted tab",
+        lambda: _active_tab_id(app) == current_id,
+        message="the second Recent Tab commit to select the highlighted tab",
     )
     assert not _status(app)["recentTabSwitcherVisible"]
