@@ -2680,7 +2680,15 @@ final class AppState {
     func cycleRecentTab(projectID: UUID) {
         guard let ws = workspaces[projectID] else { return }
         if tabCycleOrder.isEmpty {
-            tabCycleOrder = ws.recencyOrder()
+            // The limit bounds the cycle whether or not the switcher shows it:
+            // the cards and the keyboard walk one list, so a limit that only
+            // applied with the overlay on would make a tab's reachability
+            // depend on a display preference.
+            let recency = ws.recencyOrder()
+            let candidateLimit = Preferences.shared.recentTabCandidates
+            tabCycleOrder = candidateLimit == Preferences.unlimitedRecentTabCandidates
+                ? recency
+                : Array(recency.prefix(candidateLimit))
             tabCycleIndex = 0
             prepareTabCyclePreviews(in: ws)
         }

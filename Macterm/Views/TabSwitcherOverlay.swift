@@ -38,27 +38,22 @@ struct TabSwitcherOverlay: View {
 
     var body: some View {
         if let workspace = activeWorkspace, appState.tabCycleTabIDs.count > 1 {
-            let entries = tabs(in: workspace)
-            GeometryReader { geo in
-                TabSwitcherStrip(
-                    entries: entries,
-                    selection: appState.tabCycleSelection,
-                    availableWidth: geo.size.width,
-                    paneAspect: appState.paneContainerAspect,
-                    onHover: { appState.focusTabCycle(at: $0) },
-                    onClick: { index in
-                        guard let projectID = appState.activeProjectID else { return }
-                        appState.commitTabCycle(projectID: projectID, at: index)
-                    }
-                )
-                .glassPanel()
-                // Centered: the strip is the whole interface for the gesture
-                // (the window behind it does not change until release), so it
-                // belongs where the eye already is rather than tucked at an
-                // edge — and centering is also what makes it a plausible
-                // pointer target.
-                .frame(width: geo.size.width, height: geo.size.height)
-            }
+            TabSwitcherStrip(
+                entries: tabs(in: workspace),
+                selection: appState.tabCycleSelection,
+                paneAspect: appState.paneContainerAspect,
+                onHover: { appState.focusTabCycle(at: $0) },
+                onClick: { index in
+                    guard let projectID = appState.activeProjectID else { return }
+                    appState.commitTabCycle(projectID: projectID, at: index)
+                }
+            )
+            // Centered: the strip is the whole interface for the gesture
+            // (the window behind it does not change until release), so it
+            // belongs where the eye already is rather than tucked at an
+            // edge — and centering is also what makes it a plausible
+            // pointer target.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .transition(.opacity)
         }
     }
@@ -82,20 +77,28 @@ struct TabSwitcherOverlay: View {
 
 // MARK: - Strip
 
-/// The cards themselves — a fixed-width viewport onto the cycle order, scrolled
-/// to keep the selection centered, with a slice of the neighbouring card
-/// showing at each edge that has more behind it.
+/// The cards themselves, wrapped into centered rows (`CenteredRows`) at the
+/// width the window leaves inside `windowMargin`, so a wide window shows more
+/// of the order per row and a narrow one still shows a readable card.
 ///
-/// A viewport rather than a scroll view: the gesture is keyboard-only and lasts
-/// under a second, so there is nothing to scroll *with*, and a strip that grew
-/// with the tab count would run past the window on a project with a dozen tabs
-/// (measured: five cards already overflowed a 948pt window edge to edge). How
-/// many fit is asked of the window rather than hardcoded, so a wide window
-/// shows more of the order and a narrow one still shows a readable card.
+/// The panel hugs its rows while they fit the window's height and becomes a
+/// vertical scroll view when they don't (`ViewThatFits`). An earlier cut
+/// rejected a scroll view because the gesture is keyboard-only and over in
+/// under a second, so there is nothing to scroll *with* — that still holds for
+/// the keyboard: a step keeps the selected card centered on its own, so nobody
+/// has to scroll to follow it. The scroll view exists for the Unlimited
+/// candidate count, where the rows can outgrow any window: the pointer is
+/// available for the whole hold (a click here is a modifier-click already), so
+/// a wheel over the panel reaches the rows the selection is not on. A hover
+/// never scrolls — the hovered card is under the pointer, so it is already
+/// visible, and centering it would slide the rows away under the cursor (see
+/// `HoverSelectionTracker`).
 private struct TabSwitcherStrip: View {
+    @Environment(\.accessibilityReduceMotion)
+    private var reduceMotion
+
     let entries: [TabSwitcherEntry]
     let selection: Int
-    let availableWidth: CGFloat
     /// Width over height of the region the panes actually fill, so cards are
     /// shaped like the thing they picture. nil before anything was measured.
     let paneAspect: CGFloat?
@@ -112,36 +115,64 @@ private struct TabSwitcherStrip: View {
     /// (left over from a uniform padding that was removed around it), which
     /// made the top gap 20 against 18 at the sides.
     private static let insets: CGFloat = 14
-    /// Left clear on both sides of the panel, so it reads as floating in the
-    /// window rather than spanning it.
+    /// Clear space between the panel and the window edges — applied as padding
+    /// on both axes, so it bounds the rows' width and the panel's height as a
+    /// layout fact rather than a number the wrapping has to agree with.
     private static let windowMargin: CGFloat = 48
-    /// Width reserved on a side that has more tabs behind it, so a slice of
-    /// the next card shows through the clip. That sliver IS the overflow
-    /// indicator — a chevron and a count said the same thing in a second
-    /// visual language, when the strip can just show you the thing itself.
-    /// Its own width plus the gap before it, so `peek - spacing` of card
-    /// stays visible.
-    private static let peek: CGFloat = 34
+
+    @State
+    private var hoverTracker = HoverSelectionTracker()
+    /// The width the rows laid out at inside the scroll view, so the panel can
+    /// hug them there too. nil until the scroll view has laid out once.
+    @State
+    private var scrolledRowsWidth: CGFloat?
 
     var body: some View {
-        let cardWidth = TabSwitcherCard.width(forPaneAspect: paneAspect)
-        let capacity = capacity(for: availableWidth, cardWidth: cardWidth)
-        let step = cardWidth + Self.spacing
-        let content = span(of: entries.count, cardWidth: cardWidth)
-        // The viewport is `capacity` whole cards plus a peek on each side, and
-        // it does NOT change as the strip moves: the panel keeping a constant
-        // width is the point. An earlier cut added each peek only when that
-        // side had something behind it, so the panel visibly grew and shrank
-        // as the selection passed the ends.
-        let viewport = min(content, span(of: capacity, cardWidth: cardWidth) + Self.peek * 2)
-        let scroll = scrollOffset(step: step, cardWidth: cardWidth, viewport: viewport, content: content)
-        // Every card is laid out, always, and the whole row is TRANSLATED
-        // under the clip. Rendering only a windowed slice instead meant a step
-        // inserted one view and removed another, so the cards already on
-        // screen slid while the incoming one appeared out of nothing at the
-        // edge. Sliding the strip makes one motion of it: everything moves
-        // together and the next card comes in from under the clip.
-        HStack(spacing: Self.spacing) {
+        // One card tree, built once: `ViewThatFits` keeps every candidate it
+        // measures in the graph, so two copies of the rows would mean every
+        // card body — and every pane preview — evaluating twice per tick.
+        let rows = cards.padding(Self.insets)
+
+        ScrollViewReader { proxy in
+            ViewThatFits(in: .vertical) {
+                rows
+
+                ScrollView(.vertical) {
+                    rows.onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                        scrolledRowsWidth = $0
+                    }
+                }
+                .scrollIndicators(.visible)
+                // A vertical scroll view is greedy in width, so left alone it
+                // would stretch the panel to the window margins with the rows
+                // centered inside — a different panel shape from the hugging
+                // one above, and a hit-testable band beside the rows that
+                // stops clicks reaching the terminal. Sized to the rows
+                // instead, from the width they lay out at: only the content
+                // knows it, and the same rows come out at that width again.
+                .frame(maxWidth: scrolledRowsWidth)
+            }
+            // Once, outside the branch: `ViewThatFits` reports the chosen
+            // child's size, so the glass still hugs whichever is showing.
+            .glassPanel()
+            // `initial: true`: the strip is born with the selection already
+            // advanced (the first press both starts the cycle and moves), so
+            // the scroll view has to find it, not just follow it. In the
+            // hugging branch there is nothing to scroll and this is a no-op.
+            .onChange(of: selection, initial: true) { _, index in
+                guard !hoverTracker.isHoverSelection(index),
+                      let tabID = entries.first(where: { $0.index == index })?.tab.id
+                else { return }
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) {
+                    proxy.scrollTo(tabID, anchor: .center)
+                }
+            }
+        }
+        .padding(Self.windowMargin)
+    }
+
+    private var cards: some View {
+        CenteredRows(spacing: Self.spacing) {
             ForEach(entries, id: \.tab.id) { entry in
                 TabSwitcherCard(
                     tab: entry.tab,
@@ -149,44 +180,71 @@ private struct TabSwitcherStrip: View {
                     isSelected: entry.index == selection,
                     paneAspect: paneAspect
                 )
-                // `.clipped()` below clips hit testing too, so a card in the
-                // peek slots only answers the pointer over its visible sliver.
-                .onHover { if $0 { onHover(entry.index) } }
+                .onContinuousHover { phase in
+                    guard case .active = phase,
+                          hoverTracker.noteHover(over: entry.index, current: selection)
+                    else { return }
+                    onHover(entry.index)
+                }
                 .onTapGesture { onClick(entry.index) }
+                .id(entry.tab.id)
             }
         }
-        .offset(x: -scroll)
-        .frame(width: viewport, alignment: .leading)
-        .clipped()
-        .padding(Self.insets)
-        .animation(.easeOut(duration: 0.16), value: scroll)
+    }
+}
+
+/// Wraps its children into rows at the width it is proposed and centers each
+/// row. The native form of "how many cards fit": the layout answers from the
+/// width it is actually given, so the panel's padding and the rows' spacing
+/// can never disagree with a capacity computed beside them.
+private struct CenteredRows: Layout {
+    let spacing: CGFloat
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
     }
 
-    /// Width of `count` cards laid out with the strip's spacing.
-    private func span(of count: Int, cardWidth: CGFloat) -> CGFloat {
-        guard count > 0 else { return 0 }
-        return cardWidth * CGFloat(count) + Self.spacing * CGFloat(count - 1)
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache _: inout ()) -> CGSize {
+        let rows = rows(fitting: proposal.width, subviews: subviews)
+        return CGSize(
+            width: rows.map(\.width).max() ?? 0,
+            height: rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        )
     }
 
-    /// How far the row is scrolled: the selected card centered in the
-    /// viewport, clamped to the ends. Clamping is what fills the peek slots
-    /// with real cards at the ends instead of leaving empty panel there, and
-    /// it is stateless — the same selection always yields the same offset, so
-    /// nothing drifts across a gesture.
-    private func scrollOffset(step: CGFloat, cardWidth: CGFloat, viewport: CGFloat, content: CGFloat) -> CGFloat {
-        guard let position = entries.firstIndex(where: { $0.index == selection }) else { return 0 }
-        let centered = CGFloat(position) * step + cardWidth / 2 - viewport / 2
-        return min(max(0, centered), max(0, content - viewport))
+    func placeSubviews(in bounds: CGRect, proposal _: ProposedViewSize, subviews: Subviews, cache _: inout ()) {
+        var y = bounds.minY
+        for row in rows(fitting: bounds.width, subviews: subviews) {
+            var x = bounds.minX + (bounds.width - row.width) / 2
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: .unspecified)
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
     }
 
-    /// How many cards fit, at least one. Both peeks are reserved whether or
-    /// not a neighbour is showing in them, so the capacity — and the panel's
-    /// width — can't change as the strip moves.
-    private func capacity(for width: CGFloat, cardWidth: CGFloat) -> Int {
-        let chrome = Self.windowMargin * 2 + Self.insets * 2 + Self.peek * 2
-        let perCard = cardWidth + Self.spacing
-        let fits = Int(((width - chrome + Self.spacing) / perCard).rounded(.down))
-        return max(1, min(entries.count, fits))
+    /// Greedy: a row takes children until the next would not fit. A row is
+    /// never empty, so a child wider than the width still gets one of its own.
+    private func rows(fitting width: CGFloat?, subviews: Subviews) -> [Row] {
+        let limit = width ?? .infinity
+        var rows: [Row] = []
+        var row = Row()
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            if !row.indices.isEmpty, row.width + spacing + size.width > limit {
+                rows.append(row)
+                row = Row()
+            }
+            row.width = row.indices.isEmpty ? size.width : row.width + spacing + size.width
+            row.height = max(row.height, size.height)
+            row.indices.append(index)
+        }
+        if !row.indices.isEmpty { rows.append(row) }
+        return rows
     }
 }
 

@@ -1058,6 +1058,7 @@ private struct AppearanceSettings: View {
     @State private var showProjectNewTabButton: Bool = Preferences.shared.showProjectNewTabButton
     @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
     @State private var showTabSwitcherOverlay: Bool = Preferences.shared.showTabSwitcherOverlay
+    @State private var recentTabCandidates: Int = Preferences.shared.recentTabCandidates
     @State private var tabSwitcherPosition: String = Preferences.shared.tabSwitcherPosition.rawValue
     @State
     private var backgroundOpacity: Double = Preferences.shared.windowOpacity
@@ -1236,6 +1237,18 @@ private struct AppearanceSettings: View {
                         + "and moves the selection without switching until you let go."
                 )
                 .settingsCaption()
+
+                Picker("Recent tabs to cycle through", selection: $recentTabCandidates) {
+                    ForEach(Preferences.recentTabCandidateRange, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                    Text("Unlimited").tag(Preferences.unlimitedRecentTabCandidates)
+                }
+                .onChange(of: recentTabCandidates) { _, v in
+                    Preferences.shared.recentTabCandidates = v
+                }
+                Text("How many of the most recent tabs the Recent Tab shortcut reaches, with or without previews.")
+                    .settingsCaption()
             }
 
             Section("Toolbar") {
