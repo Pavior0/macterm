@@ -156,6 +156,14 @@ struct HorizontalWorkspaceTab: View {
                 )
             )
         }
+        // AppKit does not route the middle mouse button through SwiftUI's
+        // Button gestures. Keep the sensor transparent to every other mouse
+        // button so selection, dragging, and the context menu retain their
+        // existing responders, while a browser-style middle click closes this
+        // tab without first selecting it.
+        .overlay {
+            MiddleMouseTabCloseSensor(onClose: onClose)
+        }
         .onDisappear {
             hoverPresentationTask?.cancel()
         }
@@ -172,6 +180,45 @@ struct HorizontalWorkspaceTab: View {
             try? await Task.sleep(for: .milliseconds(220))
             guard !Task.isCancelled, isHovering, !hoverSuppressed else { return }
             isHoverCardPresented = true
+        }
+    }
+}
+
+/// Captures only a middle-button press over a tab. `hitTest` consults the
+/// current AppKit event so left-button presses continue to hit the SwiftUI
+/// content underneath instead of being swallowed by the transparent overlay.
+private struct MiddleMouseTabCloseSensor: NSViewRepresentable {
+    let onClose: () -> Void
+
+    func makeNSView(context _: Context) -> SensorView {
+        let view = SensorView()
+        view.onClose = onClose
+        return view
+    }
+
+    func updateNSView(_ view: SensorView, context _: Context) {
+        view.onClose = onClose
+    }
+
+    final class SensorView: NSView {
+        var onClose: () -> Void = {}
+
+        override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
+            true
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = window?.currentEvent,
+                  event.type == .otherMouseDown,
+                  event.buttonNumber == 2
+            else {
+                return nil
+            }
+            return super.hitTest(point)
+        }
+
+        override func otherMouseDown(with _: NSEvent) {
+            onClose()
         }
     }
 }
