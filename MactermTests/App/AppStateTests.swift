@@ -2511,7 +2511,40 @@ struct AppStateTests {
         #expect(ws.tabs.count == 1)
     }
 
-    // MARK: - Tab switcher live previews
+    // MARK: - Tab switcher candidates and live previews
+
+    @Test
+    func recent_tab_candidate_limit_applies_only_to_finite_overlay_settings() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        let priorCandidates = Preferences.shared.recentTabCandidates
+        defer {
+            Preferences.shared.showTabSwitcherOverlay = priorOverlay
+            Preferences.shared.recentTabCandidates = priorCandidates
+        }
+        let cases = [
+            (showsOverlay: true, limit: 3, expectedCount: 3),
+            (showsOverlay: true, limit: 0, expectedCount: 6),
+            (showsOverlay: false, limit: 2, expectedCount: 6),
+        ]
+
+        for testCase in cases {
+            Preferences.shared.showTabSwitcherOverlay = testCase.showsOverlay
+            Preferences.shared.recentTabCandidates = testCase.limit
+
+            let state = makeAppState()
+            let project = seedProject(state)
+            let workspace = try #require(state.workspaces[project.id])
+            for _ in 0 ..< 5 {
+                state.createTab(projectID: project.id, projects: [project])
+            }
+            let expectedOrder = Array(workspace.recencyOrder().prefix(testCase.expectedCount))
+
+            state.cycleRecentTab(projectID: project.id)
+
+            #expect(state.tabCycleTabIDs == expectedOrder)
+            state.commitTabCycle(projectID: project.id)
+        }
+    }
 
     /// A cycle showing the switcher wakes the renderer of every pane it
     /// offers and samples them until the modifier is released — an off-screen

@@ -299,6 +299,15 @@ final class Preferences {
         didSet { defaults.set(showTabSwitcherOverlay, forKey: Keys.showTabSwitcherOverlay) }
     }
 
+    /// Finite candidate counts offered in Settings and accepted from storage.
+    static let recentTabCandidateRange = 2 ... 12
+
+    /// Maximum recent tabs shown in the switcher. `0` means unlimited;
+    /// direct cycling without the switcher always uses the full recency order.
+    var recentTabCandidates: Int {
+        didSet { defaults.set(recentTabCandidates, forKey: Keys.recentTabCandidates) }
+    }
+
     /// Whether the running spinner also replaces an AI agent's logo (#225).
     /// Off keeps the agent logo while the agent works — agent CLIs draw their
     /// own busy indicator in the tab title, so the spinner is redundant there —
@@ -817,6 +826,9 @@ final class Preferences {
         showAgentIcons = defaults.object(forKey: Keys.showAgentIcons) as? Bool ?? true
         showTabStatusIndicator = defaults.object(forKey: Keys.showTabStatusIndicator) as? Bool ?? false
         showTabSwitcherOverlay = defaults.object(forKey: Keys.showTabSwitcherOverlay) as? Bool ?? true
+        recentTabCandidates = Self.clampRecentTabCandidates(
+            defaults.object(forKey: Keys.recentTabCandidates) as? Int
+        )
         showSpinnerOverAgentIcons = defaults.object(forKey: Keys.showSpinnerOverAgentIcons) as? Bool ?? true
         autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
         autoAssignProjectColors = defaults.object(forKey: Keys.autoAssignProjectColors) as? Bool ?? false
@@ -854,6 +866,13 @@ final class Preferences {
     static func clampSidebarWidth(_ v: Double?) -> Double {
         guard let v, v > 0 else { return defaultSidebarWidth }
         return min(max(v, sidebarWidthRange.lowerBound), sidebarWidthRange.upperBound)
+    }
+
+    /// One candidate cannot switch tabs; zero is the explicit unlimited value.
+    private static func clampRecentTabCandidates(_ v: Int?) -> Int {
+        guard let v else { return 5 }
+        if v == 0 { return 0 }
+        return min(max(v, recentTabCandidateRange.lowerBound), recentTabCandidateRange.upperBound)
     }
 
     private static func clampScrollSpeed(_ v: Double, fallback: Double) -> Double {
@@ -949,6 +968,7 @@ final class Preferences {
         static let showAgentIcons = "macterm.sidebar.showAgentIcons"
         static let showTabStatusIndicator = "macterm.sidebar.showTabStatusIndicator"
         static let showTabSwitcherOverlay = "macterm.tabSwitcher.overlay"
+        static let recentTabCandidates = "macterm.tabs.recentTabCandidates"
         static let showSpinnerOverAgentIcons = "macterm.sidebar.showSpinnerOverAgentIcons"
         static let autoNameTabs = "macterm.tabs.autoName"
         static let autoAssignProjectColors = "macterm.projects.autoAssignColors"

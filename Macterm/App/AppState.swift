@@ -2660,7 +2660,13 @@ final class AppState {
     func cycleRecentTab(projectID: UUID) {
         guard let ws = workspaces[projectID] else { return }
         if tabCycleOrder.isEmpty {
-            tabCycleOrder = ws.recencyOrder()
+            let recency = ws.recencyOrder()
+            let candidateLimit = Preferences.shared.recentTabCandidates
+            if Preferences.shared.showTabSwitcherOverlay, candidateLimit > 0 {
+                tabCycleOrder = Array(recency.prefix(candidateLimit))
+            } else {
+                tabCycleOrder = recency
+            }
             tabCycleIndex = 0
             prepareTabCyclePreviews(in: ws)
         }
