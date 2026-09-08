@@ -71,6 +71,7 @@ final class ControlHandler {
         case "window.list": return windowList()
         case "window.new": return windowNew()
         case "window.close": return try windowClose(args)
+        case "window.focus": return try windowFocus(args)
         case "pane.list": return try paneList(args)
         case "pane.inspect": return try paneInspect(args)
         case "pane.dump": return try paneDump(args)
@@ -168,7 +169,9 @@ final class ControlHandler {
                 focused: appState.keyWindowID == window.id,
                 sidebarWidth: window.sidebarWidth,
                 tabID: window.activeProjectID
-                    .flatMap { appState.displayedTab(for: $0, in: window)?.id.uuidString }
+                    .flatMap { appState.selectedTab(for: $0, in: window)?.id.uuidString },
+                mirrored: window.activeProjectID
+                    .flatMap { appState.viewTab(for: $0, in: window)?.isMirror }
             )
         }
         return ControlData(windows: infos)
@@ -201,6 +204,16 @@ final class ControlHandler {
 
     private func windowNew() -> ControlData {
         appState.requestNewWindow()
+        return ControlData()
+    }
+
+    /// Make a window key — what clicking it does — so leadership and the
+    /// app-wide mirrors follow it.
+    private func windowFocus(_ args: ControlArgs) throws -> ControlData {
+        guard let window = try resolveWindow(args) else {
+            throw ControlError(code: .badRequest, message: "window.focus requires a window selector")
+        }
+        appState.focusWindow(window)
         return ControlData()
     }
 

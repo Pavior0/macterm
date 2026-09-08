@@ -131,7 +131,12 @@ final class AppState {
     /// window by itself, so that one adopts the first saved entry and only the
     /// REST are opened. Opening all of them would leave a spare window on
     /// every launch.
+    /// Set once `restoreWindows` has run — the moment a window's saved
+    /// sidebar state is known. `WindowAppearance`'s restore waits for it.
+    private(set) var hasRestoredWindows = false
+
     func restoreWindows(adopting first: WindowState) {
+        defer { hasRestoredWindows = true }
         let saved = savedWindowSnapshots
         savedWindowSnapshots = []
         // This runs after `restoreSelection`, which is the first moment the
@@ -141,6 +146,7 @@ final class AppState {
         guard !saved.isEmpty else { return }
         first.activeProjectID = saved[0].activeProjectID ?? first.activeProjectID
         if let width = saved[0].sidebarWidth { first.sidebarWidth = width }
+        if let visible = saved[0].sidebarVisible { first.sidebarVisible = visible }
         if let project = first.activeProjectID, let tab = saved[0].activeTabID {
             first.activeTabIDs[project] = tab
         }
@@ -259,6 +265,17 @@ final class AppState {
         appDelegate?.forgetTerminalWindow(nsWindow)
     }
 
+    /// Make `window` key — what a click on it does. Goes through AppKit AND
+    /// `noteKeyWindow` directly: an inactive app (a CLI caller from another
+    /// terminal, the e2e harness) posts no key notification, and the model
+    /// has to follow either way.
+    func focusWindow(_ window: WindowState) {
+        if let nsWindow = nsWindow(for: window) {
+            nsWindow.makeKeyAndOrderFront(nil)
+        }
+        noteKeyWindow(window)
+    }
+
     /// Close a window — the named one, else the focused one. The last visible
     /// window hides instead; see `AppDelegate.closeTerminalWindow`.
     func closeWindow(_ window: WindowState?) {
@@ -305,11 +322,22 @@ final class AppState {
                 if let tab = restoring.activeTabID { window.activeTabIDs[project] = tab }
             }
             if let width = restoring.sidebarWidth { window.sidebarWidth = width }
+            if let visible = restoring.sidebarVisible { window.sidebarVisible = visible }
+        } else if hasRestoredWindows {
+            // A window the user opened, not one being restored: the sidebar
+            // comes up at the app's defaults — shown, at the default width.
+            // `WindowState.init` seeds the width from `Preferences.sidebarWidth`,
+            // which is whatever was LAST dragged in any window (a since-closed
+            // one included); that suits the first window's launch fallback,
+            // not a fresh window.
+            window.sidebarWidth = Preferences.defaultSidebarWidth
+            window.sidebarVisible = true
         }
         // A new window opens on whatever the user was last looking at, which
         // is both the useful default and what a single-window build did.
         if window.activeProjectID == nil { window.activeProjectID = activeProjectID }
         windows.append(window)
+        reconcileWindowViews()
         logger.debug("registerWindow: \(window.id, privacy: .public) count=\(self.windows.count)")
         frontRestoredKeyWindowIfNeeded()
         persistWindows()
@@ -323,7 +351,18 @@ final class AppState {
         // of what was open.
         guard !AppTerminationState.isTerminating else { return }
         windows.removeAll { $0.id == window.id }
-        if keyWindowID == window.id { keyWindowID = nil }
+        if keyWindowID == window.id {
+            // The user is always "in" some window while one exists. AppKit
+            // usually makes another window key and reports it, but not while
+            // the app is inactive — a headless harness never sees that report,
+            // and every window then read as unfocused with the app-wide
+            // mirrors stranded. Promote the first; the next real key event
+            // corrects it.
+            keyWindowID = windows.first?.id
+            alignKeyWindowTab()
+        }
+        dropShadows(of: window, except: nil)
+        reconcileWindowViews()
         logger.debug("unregisterWindow: \(window.id, privacy: .public) count=\(self.windows.count)")
         persistWindows()
     }
@@ -373,68 +412,179 @@ final class AppState {
         if keyWindowID == window.id {
             activeProjectID = projectID
             alignKeyWindowTab()
+        } else {
+            reconcileWindowViews()
         }
         persistWindows()
     }
 
     // MARK: - Per-window tab selection (#345)
 
-    /// The tab `window` shows for `projectID`, or nil when it has none to
-    /// show — every tab of the project is on screen in another window.
+    /// The real tab `window` has selected in `projectID`: its own record when
+    /// that tab still exists, else the workspace's active tab. Two windows may
+    /// select the same tab — `viewTab(for:in:)` decides which one renders the
+    /// real panes and which a mirror of them.
+    func selectedTab(for projectID: UUID, in window: WindowState) -> TerminalTab? {
+        guard let ws = workspaces[projectID] else { return nil }
+        if let id = window.activeTabIDs[projectID], let tab = ws.tabs.first(where: { $0.id == id }) {
+            return tab
+        }
+        return ws.activeTab
+    }
+
+    /// What a window renders for a project.
+    struct WindowTabView {
+        /// The tab to render — the real one, or a per-window mirror of it.
+        let tab: TerminalTab
+        /// The real tab when `tab` is a mirror; nil when `tab` IS the real tab.
+        let mirrorOf: TerminalTab?
+        var isMirror: Bool { mirrorOf != nil }
+        /// The tab actions act on: always the real one.
+        var real: TerminalTab { mirrorOf ?? tab }
+    }
+
+    /// What `window` renders for `projectID` (#345).
     ///
     /// A pane owns exactly one `NSView`, which can live in one view hierarchy,
     /// so two windows can never render the same tab: the second to add the
-    /// view took it from the first, which then drew nothing. Each window keeps
-    /// its own choice in `WindowState.activeTabIDs`; this resolves conflicts
-    /// deterministically, with the KEY window first and creation order after
-    /// it, so a tab claimed twice is shown by exactly one window and the other
-    /// falls back to a tab nobody else claims — or to nothing, which the
-    /// window renders as an offer to mirror the tab instead.
+    /// view took it from the first, which then drew nothing. Each tab has one
+    /// OWNER window that renders its real panes; every other window that
+    /// selects the tab renders a shadow — a per-window tab of mirror panes in
+    /// the same shape, the same zmx sessions attached a second time, so both
+    /// windows show the same live work (the other view is dimmed where the pty
+    /// is sized for the leader). Ownership is sticky (`tabOwners`), so
+    /// switching key windows never swaps which window has the real panes.
     ///
-    /// Pure: safe to call from a view body. `Workspace.activeTabID` stays the
-    /// key window's tab through `alignKeyWindowTab` and the workspace hook,
-    /// which is what keeps every "the tab the user is working in" call site
-    /// correct as written.
-    func displayedTab(for projectID: UUID, in window: WindowState) -> TerminalTab? {
-        guard let ws = workspaces[projectID], !ws.tabs.isEmpty else { return nil }
-        let valid = Set(ws.tabs.map(\.id))
-        // Every window on this project, key first, then creation order.
-        // Key first, then creation order — a partition, not `sorted`, which
-        // is not stable and would shuffle the non-key windows.
-        let onProject = windows.filter { $0.activeProjectID == projectID }
-        let contenders = onProject.filter { $0.id == keyWindowID } + onProject.filter { $0.id != keyWindowID }
-        guard contenders.contains(where: { $0.id == window.id }) else {
-            // Not showing the project (yet): report its own choice if valid.
-            return window.activeTabIDs[projectID].flatMap { id in ws.tabs.first { $0.id == id } }
+    /// Safe from a view body: the only write is to the unobserved
+    /// `shadowTabs`.
+    func viewTab(for projectID: UUID, in window: WindowState) -> WindowTabView? {
+        guard let selected = selectedTab(for: projectID, in: window) else { return nil }
+        if ownerWindow(of: selected, in: projectID)?.id == window.id {
+            return WindowTabView(tab: selected, mirrorOf: nil)
         }
-        var taken: Set<UUID> = []
-        var awaitingFallback: [WindowState.ID] = []
-        var resolved: [WindowState.ID: UUID] = [:]
-        for contender in contenders {
-            if let choice = contender.activeTabIDs[projectID], valid.contains(choice), !taken.contains(choice) {
-                taken.insert(choice)
-                resolved[contender.id] = choice
-            } else {
-                awaitingFallback.append(contender.id)
+        return WindowTabView(tab: shadow(of: selected, for: window), mirrorOf: selected)
+    }
+
+    /// Which window renders the real panes of each tab, by tab id. Written by
+    /// `reconcileWindowViews` at every mutation point; `ownerWindow` reads it
+    /// and falls back to creation order when it is stale, so the pure and the
+    /// stored answers always agree.
+    private var tabOwners: [UUID: WindowState.ID] = [:]
+
+    private func windowsSelecting(_ tab: TerminalTab, in projectID: UUID) -> [WindowState] {
+        windows.filter { $0.activeProjectID == projectID && selectedTab(for: projectID, in: $0)?.id == tab.id }
+    }
+
+    private func ownerWindow(of tab: TerminalTab, in projectID: UUID) -> WindowState? {
+        let selecting = windowsSelecting(tab, in: projectID)
+        if let recorded = tabOwners[tab.id], let owner = selecting.first(where: { $0.id == recorded }) {
+            return owner
+        }
+        return selecting.first
+    }
+
+    /// Settle ownership for every selected tab and drop the shadows nobody
+    /// renders any more. Called wherever a window's selection or project can
+    /// change; cheap (windows × tabs), so also from `saveWorkspaces`, which
+    /// follows every structural mutation.
+    private func reconcileWindowViews() {
+        // Pin every window's selection. A window with no record of its own for
+        // its project falls back to `ws.activeTab` — the KEY window's tab — so
+        // it silently followed the key window's every tab switch: its shadow
+        // was rebuilt each time (new pane ids, surfaces torn down and made
+        // again) and every leadership record for the old mirrors went stale.
+        // A window that has landed on a tab keeps it until it selects another.
+        for window in windows {
+            guard let projectID = window.activeProjectID, projectID != PinnedTabs.projectID,
+                  let ws = workspaces[projectID]
+            else { continue }
+            let valid = window.activeTabIDs[projectID].map { id in ws.tabs.contains { $0.id == id } } ?? false
+            if !valid, let current = ws.activeTabID {
+                window.activeTabIDs[projectID] = current
             }
         }
-        // Windows with no valid, unclaimed choice take the free tabs in order.
-        var free = ws.tabs.map(\.id).filter { !taken.contains($0) }
-        for id in awaitingFallback {
-            guard !free.isEmpty else { break }
-            resolved[id] = free.removeFirst()
+        var owners: [UUID: WindowState.ID] = [:]
+        for window in windows {
+            guard let projectID = window.activeProjectID,
+                  let tab = selectedTab(for: projectID, in: window)
+            else { continue }
+            if owners[tab.id] == nil {
+                owners[tab.id] = ownerWindow(of: tab, in: projectID)?.id ?? window.id
+            }
         }
-        return resolved[window.id].flatMap { id in ws.tabs.first { $0.id == id } }
+        tabOwners = owners
+        for window in windows {
+            var keep: UUID?
+            if let projectID = window.activeProjectID,
+               let tab = selectedTab(for: projectID, in: window),
+               owners[tab.id] != window.id
+            {
+                keep = tab.id
+            }
+            dropShadows(of: window, except: keep)
+        }
+    }
+
+    /// The shadow of `tab` for `window`, rebuilt when the real tab's shape
+    /// changed (a split, a closed or moved pane). Rebuilding detaches the old
+    /// mirrors. Ratios are copied at build time and are the shadow's own
+    /// afterwards — the two windows differ in size anyway.
+    private func shadow(of tab: TerminalTab, for window: WindowState) -> TerminalTab {
+        let shape = tab.splitRoot.shapeSignature
+        if let existing = window.shadowTabs[tab.id], existing.mirrorShape == shape { return existing }
+        if let stale = window.shadowTabs[tab.id] { retireShadow(stale) }
+        let built = TerminalTab(
+            id: UUID(),
+            splitRoot: tab.splitRoot.mirrored(),
+            focusedPaneID: nil,
+            customTitle: tab.customTitle
+        )
+        built.mirrorShape = shape
+        window.shadowTabs[tab.id] = built
+        return built
+    }
+
+    private func dropShadows(of window: WindowState, except keep: UUID?) {
+        for (id, shadow) in window.shadowTabs where id != keep {
+            window.shadowTabs.removeValue(forKey: id)
+            retireShadow(shadow)
+        }
+    }
+
+    /// Detach a shadow's mirrors. `destroySurface` ends the pane's zmx CLIENT
+    /// only — a mirror never owns its session. Deferred because this can run
+    /// from a view body (`viewTab` rebuilding a shadow mid-render).
+    private func retireShadow(_ shadow: TerminalTab) {
+        let panes = shadow.splitRoot.allPanes()
+        // Its leadership records die with it. Left in place they point at
+        // panes no longer attached, and `isLeader` then falls back to a guess
+        // the daemon has just contradicted (see `surfaceDidGetSize`).
+        let retired = Set(panes.map(\.id))
+        sessionLeaders = sessionLeaders.filter { !retired.contains($0.value) }
+        DispatchQueue.main.async {
+            for pane in panes {
+                pane.destroySurface()
+            }
+        }
+    }
+
+    /// The pane in `to` at the same tree position as `paneID` in `from`. A
+    /// shadow shares its real tab's shape, so position is identity between
+    /// them: this maps a click in a mirror onto the real pane it stands for,
+    /// and the real tab's focus and zoom back onto the mirror to draw.
+    func counterpartPaneID(_ paneID: UUID, from: TerminalTab, to: TerminalTab) -> UUID? {
+        let source = from.splitRoot.allPanes()
+        guard let index = source.firstIndex(where: { $0.id == paneID }) else { return nil }
+        let target = to.splitRoot.allPanes()
+        return target.indices.contains(index) ? target[index].id : nil
     }
 
     /// Select a tab in a specific window.
     ///
     /// The key window's selection is the workspace's `activeTabID` (the
     /// workspace hook then records it in the window's own map); any other
-    /// window records its choice directly. A choice that collides with the key
-    /// window's tab loses to it — the key window is where the user is — so a
-    /// CLI `--window` selection of an on-screen tab shows the fallback until
-    /// that window is fronted.
+    /// window records its choice directly. Selecting a tab another window
+    /// owns is fine — this window renders a mirror view of it.
     func selectTab(_ tabID: UUID, projectID: UUID, in window: WindowState) {
         if keyWindowID == window.id || projectID == PinnedTabs.projectID {
             selectTab(tabID, projectID: projectID)
@@ -442,23 +592,92 @@ final class AppState {
         }
         guard let ws = workspaces[projectID], ws.tabs.contains(where: { $0.id == tabID }) else { return }
         window.activeTabIDs[projectID] = tabID
+        reconcileWindowViews()
         persistWindows()
     }
 
-    /// Make the workspace's active tab the one the key window shows.
+    /// Make the workspace's active tab the one the key window has selected.
     ///
-    /// Called whenever the key window or its project changes. Two directions
-    /// meet here: the window's own recorded choice wins when it is valid and
-    /// free, else the window takes the resolved fallback — and either way the
-    /// workspace follows, so keyboard actions land in the tab on screen.
+    /// Called whenever the key window or its project changes. The window's
+    /// own recorded choice wins when it still exists; a window with no record
+    /// adopts the workspace's current tab. Either way the two agree afterwards,
+    /// so keyboard actions land in the tab on screen in the key window.
     private func alignKeyWindowTab() {
         guard let key = keyWindow, let projectID = key.activeProjectID,
               projectID != PinnedTabs.projectID,
               let ws = workspaces[projectID]
         else { return }
-        guard let shown = displayedTab(for: projectID, in: key) else { return }
-        key.activeTabIDs[projectID] = shown.id
-        if ws.activeTabID != shown.id { ws.peekTab(shown.id) }
+        if let chosen = key.activeTabIDs[projectID], ws.tabs.contains(where: { $0.id == chosen }) {
+            if ws.activeTabID != chosen { ws.peekTab(chosen) }
+        } else if let current = ws.activeTabID {
+            key.activeTabIDs[projectID] = current
+        }
+        reconcileWindowViews()
+        claimLeadershipForKeyWindow()
+    }
+
+    /// Leadership follows the KEY WINDOW's tab, all of it (#345).
+    ///
+    /// Two windows on one tab: bringing a window to the front is the user
+    /// saying "this is the view I'm working in", so every pane of the tab it
+    /// shows claims its session — the whole tab becomes leader at once, not
+    /// one pane on the next click. Runs on every key-window and key-tab
+    /// change. A pane whose surface has no size yet refuses the claim; the
+    /// `.terminalSurfaceSized` observer sends it when the surface comes up.
+    private func claimLeadershipForKeyWindow() {
+        guard let key = keyWindow, let projectID = key.activeProjectID,
+              let view = viewTab(for: projectID, in: key)
+        else { return }
+        claimLeadership(forPanesIn: view.tab)
+    }
+
+    /// Claim for a tab's panes, one per session. A tab can hold two panes on
+    /// ONE session (`pane mirror`), and claiming for both would hand the pty
+    /// to whichever came last in tree order — the source lost leadership to
+    /// its own mirror every time the window became key. A session already led
+    /// by a pane of this tab is left as it is; otherwise the tab's focused
+    /// pane on that session claims, else the first.
+    private func claimLeadership(forPanesIn tab: TerminalTab) {
+        let panes = tab.splitRoot.allPanes()
+        var handled: Set<String> = []
+        for pane in panes where !handled.contains(pane.sessionName) {
+            handled.insert(pane.sessionName)
+            let siblings = panes.filter { $0.sessionName == pane.sessionName }
+            // Skip only on a RECORDED leader in this tab, never on the inferred
+            // one: `isLeader` falls back to tree order when the record is
+            // stale (a retired mirror's id), and that guess is exactly what a
+            // rebuilt mirror elsewhere has just falsified — zmx hands a fresh
+            // client leadership whenever the previous leader detached.
+            if let recorded = sessionLeaders[pane.sessionName],
+               siblings.contains(where: { $0.id == recorded })
+            {
+                continue
+            }
+            let claimant = siblings.first { $0.id == tab.focusedPaneID } ?? pane
+            claimSessionLeadership(claimant)
+        }
+    }
+
+    /// A pane's surface just got its first size. If the pane is on screen in
+    /// the key window's tab its session should already be led from that tab —
+    /// the claim that ran when the window became key was refused for lack of
+    /// a size.
+    func surfaceDidGetSize(paneID: UUID) {
+        guard let key = keyWindow, let projectID = key.activeProjectID,
+              let view = viewTab(for: projectID, in: key)
+        else { return }
+        // A surface coming up ELSEWHERE matters too: its zmx client has just
+        // attached, and the daemon makes a new client leader whenever the
+        // session had none — the state a rebuilt mirror leaves behind, its
+        // old client having detached as the leader. So the key window
+        // re-asserts: the session's record is dropped and its pane claims.
+        if view.tab.splitRoot.findPane(id: paneID) == nil,
+           let elsewhere = allAttachedPanes().first(where: { $0.id == paneID }),
+           isMirrored(elsewhere)
+        {
+            sessionLeaders.removeValue(forKey: elsewhere.sessionName)
+        }
+        claimLeadership(forPanesIn: view.tab)
     }
 
     /// The workspace hook: its active tab changed by any writer — `createTab`,
@@ -475,6 +694,8 @@ final class AppState {
         } else {
             target.activeTabIDs.removeValue(forKey: ws.projectID)
         }
+        reconcileWindowViews()
+        if target.id == keyWindowID { claimLeadershipForKeyWindow() }
     }
 
     /// Install the hook on every workspace the dictionary holds. Runs from
@@ -487,61 +708,6 @@ final class AppState {
                 workspaceActiveTabDidChange(ws)
             }
         }
-    }
-
-    /// A second tab showing the same sessions as `tabID` — every pane
-    /// mirrored, same split structure (#345). This is how the same work gets
-    /// on screen in two windows: a tab can only be rendered once, but its
-    /// sessions can be attached any number of times.
-    ///
-    /// The new tab is selected in `window` when given. Mirrors do not take
-    /// leadership: the source's panes keep driving the pty sizes until the
-    /// user focuses a mirror.
-    @discardableResult
-    func mirrorTab(_ tabID: UUID, projectID: UUID, in window: WindowState? = nil) -> UUID? {
-        guard let ws = workspaces[projectID],
-              let source = ws.tabs.first(where: { $0.id == tabID })
-        else { return nil }
-        var focused: UUID?
-        func mirrored(_ node: SplitNode) -> SplitNode {
-            switch node {
-            case let .pane(pane):
-                let mirror = Pane(mirroring: pane)
-                if pane.id == source.focusedPaneID { focused = mirror.id }
-                return .pane(mirror)
-            case let .split(branch):
-                return .split(SplitBranch(
-                    direction: branch.direction,
-                    ratio: branch.ratio,
-                    first: mirrored(branch.first),
-                    second: mirrored(branch.second)
-                ))
-            }
-        }
-        let root = mirrored(source.splitRoot)
-        let tab = TerminalTab(
-            id: UUID(),
-            splitRoot: root,
-            focusedPaneID: focused ?? root.allPanes().first?.id,
-            customTitle: source.customTitle
-        )
-        // Record the sources as leaders before the tab is visible, so the
-        // mirrors come up dimmed rather than flickering into it.
-        for pane in source.splitRoot.allPanes() {
-            noteSessionLeader(pane)
-        }
-        let index = ws.tabs.firstIndex(where: { $0.id == tabID }).map { $0 + 1 } ?? ws.tabs.count
-        let previousActive = ws.activeTabID
-        ws.adoptTab(tab, at: index)
-        if let window {
-            // `adoptTab` selected the new tab in the workspace, i.e. in the KEY
-            // window. A mirror made for a background window belongs to that
-            // window alone, so the key window keeps what it was showing.
-            if keyWindowID != window.id, let previousActive { ws.peekTab(previousActive) }
-            selectTab(tab.id, projectID: projectID, in: window)
-        }
-        saveWorkspaces()
-        return tab.id
     }
 
     /// A window's sidebar width changed; get it into the snapshot.
@@ -980,6 +1146,10 @@ final class AppState {
                 guard let paneID = note.object as? UUID else { return }
                 MainActor.assumeIsolated { self?.noteUserInput(paneID: paneID) }
             }),
+            (center, center.addObserver(forName: .terminalSurfaceSized, object: nil, queue: .main) { [weak self] note in
+                guard let paneID = note.object as? UUID else { return }
+                MainActor.assumeIsolated { self?.surfaceDidGetSize(paneID: paneID) }
+            }),
             (center, center.addObserver(
                 forName: .terminalQuietSettleDeadline,
                 object: nil,
@@ -1269,6 +1439,10 @@ final class AppState {
     }
 
     func saveWorkspaces() {
+        // Every structural mutation ends here, so it is also where the
+        // windows' views follow the workspace (a shadow of a closed tab is
+        // dropped, ownership of a moved one settles).
+        reconcileWindowViews()
         // Any mutation can have created a tab inside the pinned workspace
         // (CLI `tab new`, a pane separated into it, a merge) — make sure it
         // has a record before the snapshot serializes.
@@ -1296,7 +1470,8 @@ final class AppState {
                         activeProjectID: window.activeProjectID,
                         sidebarWidth: window.sidebarWidth,
                         isKey: window.id == keyWindowID,
-                        activeTabID: window.activeProjectID.flatMap { displayedTab(for: $0, in: window)?.id }
+                        activeTabID: window.activeProjectID.flatMap { selectedTab(for: $0, in: window)?.id },
+                        sidebarVisible: window.sidebarVisible
                     )
                 }
         )
@@ -1493,11 +1668,24 @@ final class AppState {
 
     /// Every pane attached to a session, across ALL workspaces (pinned
     /// included) — the shared traversal behind `claimedSessionNames` and
-    /// `releaseSessions`.
+    /// `releaseSessions`. Workspace panes only: these are the panes that KEEP
+    /// a session alive. A window's mirror views (`allAttachedPanes`) never do.
     private func allLivePanes() -> [Pane] {
         workspaces.values
             .flatMap(\.tabs)
             .flatMap { $0.splitRoot.allPanes() }
+    }
+
+    /// Every pane with a zmx client on a session: the workspace panes plus
+    /// every window's mirror views (#345). The set leadership is judged over —
+    /// a mirror view's pane is a real client that can lead — but NOT the set
+    /// that retains a session: a shadow lives only as long as the tab it
+    /// mirrors. Real panes come first, so an unrecorded leader is inferred as
+    /// a real pane.
+    private func allAttachedPanes() -> [Pane] {
+        allLivePanes() + windows.flatMap { window in
+            window.shadowTabs.values.flatMap { $0.splitRoot.allPanes() }
+        }
     }
 
     /// Give up these panes' claims on their zmx sessions, killing a session
@@ -1570,14 +1758,14 @@ final class AppState {
     /// Every pane attached to `sessionName`, in tree order across all
     /// workspaces.
     func panesAttached(to sessionName: String) -> [Pane] {
-        allLivePanes().filter { $0.sessionName == sessionName }
+        allAttachedPanes().filter { $0.sessionName == sessionName }
     }
 
     /// Whether another pane shows this pane's session — i.e. whether the
     /// leader distinction means anything for it at all.
     func isMirrored(_ pane: Pane) -> Bool {
         var seen = false
-        for candidate in allLivePanes() where candidate.sessionName == pane.sessionName {
+        for candidate in allAttachedPanes() where candidate.sessionName == pane.sessionName {
             if seen { return true }
             seen = true
         }
@@ -1617,7 +1805,7 @@ final class AppState {
     /// this and use `isLeader(_:among:)`.
     func sessionAttachments() -> [String: [Pane]] {
         var attachments: [String: [Pane]] = [:]
-        for pane in allLivePanes() {
+        for pane in allAttachedPanes() {
             attachments[pane.sessionName, default: []].append(pane)
         }
         return attachments
@@ -1641,7 +1829,7 @@ final class AppState {
 
     /// `noteUserInput(in:)` by pane id, for the notification path.
     func noteUserInput(paneID: UUID) {
-        guard let pane = allLivePanes().first(where: { $0.id == paneID }) else { return }
+        guard let pane = allAttachedPanes().first(where: { $0.id == paneID }) else { return }
         noteUserInput(in: pane)
     }
 
@@ -1685,7 +1873,11 @@ final class AppState {
     func claimSessionLeadership(_ pane: Pane) {
         guard isMirrored(pane), !pane.isRemote else { return }
         guard sessionLeaders[pane.sessionName] != pane.id else { return }
-        if sendClaim(pane) { sessionLeaders[pane.sessionName] = pane.id }
+        let delivered = sendClaim(pane)
+        logger.debug(
+            "claim \(pane.sessionName, privacy: .public) by \(pane.id, privacy: .public) delivered=\(delivered, privacy: .public)"
+        )
+        if delivered { sessionLeaders[pane.sessionName] = pane.id }
     }
 
     /// Writes the zmx leadership claim into the pane's pty, reporting whether
@@ -1709,7 +1901,7 @@ final class AppState {
     /// Drop leadership records for sessions nothing attaches any more, so the
     /// table can't grow across a long run.
     private func pruneSessionLeaders() {
-        let live = Set(allLivePanes().map(\.sessionName))
+        let live = Set(allAttachedPanes().map(\.sessionName))
         sessionLeaders = sessionLeaders.filter { live.contains($0.key) }
     }
 
@@ -1919,6 +2111,7 @@ final class AppState {
             window.activeProjectID = nil
         }
         if activeProjectID == projectID { activeProjectID = nil }
+        reconcileWindowViews()
     }
 
     /// Whether the project sits in the unloaded state `unloadProject(_:)`
@@ -3263,7 +3456,12 @@ final class AppState {
     }
 
     func focusPane(_ paneID: UUID, projectID: UUID) {
-        guard let tab = workspaces[projectID]?.activeTab else { return }
+        // The tab CONTAINING the pane, not the workspace's active tab: with
+        // several windows a click can land in a window whose tab is not the
+        // key window's, and focusing a foreign id on the active tab would
+        // leave it pointing at a pane it does not have.
+        guard let tab = workspaces[projectID]?.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil })
+        else { return }
         tab.focusPane(paneID)
         // Focusing a mirror is how the user says "drive the size from here",
         // so tell zmx as well as ourselves — its daemon only switches leader
@@ -3271,6 +3469,38 @@ final class AppState {
         if let pane = tab.splitRoot.findPane(id: paneID) {
             claimSessionLeadership(pane)
         }
+    }
+
+    /// The real pane a pane of `view` stands for — itself for the real view,
+    /// its positional counterpart for a mirror.
+    func realPaneID(for viewPaneID: UUID, in view: WindowTabView) -> UUID? {
+        guard let real = view.mirrorOf else { return viewPaneID }
+        return counterpartPaneID(viewPaneID, from: view.tab, to: real)
+    }
+
+    /// The pane of `view` that draws the real pane `realPaneID`.
+    func viewPaneID(forReal realPaneID: UUID, in view: WindowTabView) -> UUID? {
+        guard let real = view.mirrorOf else { return realPaneID }
+        return counterpartPaneID(realPaneID, from: real, to: view.tab)
+    }
+
+    /// A click in a mirror view (#345): focus the real pane it stands for, and
+    /// claim leadership for the MIRROR — the client the user is actually in.
+    func focusMirroredPane(_ paneID: UUID, in view: WindowTabView) {
+        guard let real = view.mirrorOf else { return }
+        if let realID = counterpartPaneID(paneID, from: view.tab, to: real) {
+            real.focusPane(realID)
+        }
+        if let mirror = view.tab.splitRoot.findPane(id: paneID) {
+            claimSessionLeadership(mirror)
+        }
+    }
+
+    /// `setAdaptiveBackgroundColor` for a pane of a mirror view, which lives
+    /// in no workspace.
+    func setAdaptiveBackgroundColor(_ color: CGColor?, paneID: UUID, in tab: TerminalTab) {
+        guard let pane = tab.splitRoot.findPane(id: paneID), pane.adaptiveBackgroundColor != color else { return }
+        pane.adaptiveBackgroundColor = color
     }
 
     /// Publish presentation-only renderer state through the workspace owner.

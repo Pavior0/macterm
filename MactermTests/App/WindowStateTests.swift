@@ -300,26 +300,41 @@ struct WindowStateTests {
     }
 
     @Test
-    func two_windows_on_one_project_never_display_the_same_tab() throws {
+    func two_windows_on_one_tab_render_the_real_tab_once_and_a_mirror_of_it() throws {
         // A pane owns one NSView, which can live in one hierarchy: two windows
         // rendering the same tab fought over every view and the loser drew
-        // nothing — the reported blank second window.
+        // nothing — the reported blank second window. The second window gets a
+        // mirror view: the same sessions, attached a second time.
         let state = makeAppState()
-        let (project, ws) = try seedProject(state, tabs: 2)
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let real = try #require(ws.activeTab)
+        let source = try #require(real.splitRoot.allPanes().first)
+        _ = try #require(state.splitPane(
+            source.id, direction: .horizontal, projectID: project.id, projectDirectory: "/tmp"
+        ))
         let a = WindowState(activeProjectID: project.id)
         let b = WindowState(activeProjectID: project.id)
         state.registerWindow(a)
         state.registerWindow(b)
         state.noteKeyWindow(a)
 
-        let shownA = try #require(state.displayedTab(for: project.id, in: a))
-        let shownB = try #require(state.displayedTab(for: project.id, in: b))
-        #expect(shownA.id == ws.activeTabID, "the key window shows the workspace's active tab")
-        #expect(shownA.id != shownB.id)
+        let viewA = try #require(state.viewTab(for: project.id, in: a))
+        let viewB = try #require(state.viewTab(for: project.id, in: b))
+        #expect(!viewA.isMirror)
+        #expect(viewA.tab === real)
+        #expect(viewB.isMirror)
+        #expect(viewB.mirrorOf === real)
+        #expect(viewB.tab.splitRoot.allPanes().map(\.sessionName) == real.splitRoot.allPanes().map(\.sessionName))
+        #expect(viewB.tab.splitRoot.allPanes().allSatisfy { $0.command == nil })
+        #expect(viewB.tab.splitRoot.shapeSignature == real.splitRoot.shapeSignature)
+        // Both windows report the same selected tab; only the view differs.
+        #expect(state.selectedTab(for: project.id, in: b)?.id == real.id)
     }
 
     @Test
-    func a_window_with_no_free_tab_displays_nothing() throws {
+    func a_mirror_view_is_stable_across_key_window_changes() throws {
+        // Ownership is sticky: Cmd-tabbing between the two windows must not
+        // swap which one has the real panes (a swap rebuilds both views).
         let state = makeAppState()
         let (project, _) = try seedProject(state, tabs: 1)
         let a = WindowState(activeProjectID: project.id)
@@ -327,54 +342,108 @@ struct WindowStateTests {
         state.registerWindow(a)
         state.registerWindow(b)
         state.noteKeyWindow(a)
-
-        #expect(state.displayedTab(for: project.id, in: a) != nil)
-        #expect(state.displayedTab(for: project.id, in: b) == nil)
-    }
-
-    @Test
-    func the_key_window_takes_the_workspaces_tab_and_the_other_yields() throws {
-        // Steal semantics: selecting, in the key window, the tab a background
-        // window shows moves it here and the other window falls back.
-        let state = makeAppState()
-        let (project, ws) = try seedProject(state, tabs: 2)
-        let a = WindowState(activeProjectID: project.id)
-        let b = WindowState(activeProjectID: project.id)
-        state.registerWindow(a)
-        state.registerWindow(b)
-        state.noteKeyWindow(a)
-        let bTab = try #require(state.displayedTab(for: project.id, in: b))
-
-        state.selectTab(bTab.id, projectID: project.id)
-
-        #expect(ws.activeTabID == bTab.id)
-        #expect(state.displayedTab(for: project.id, in: a)?.id == bTab.id)
-        #expect(state.displayedTab(for: project.id, in: b)?.id != bTab.id)
-    }
-
-    @Test
-    func switching_key_window_hands_the_workspace_tab_over_without_swapping() throws {
-        // Cmd-tab between two windows on one project must not swap their
-        // content: each keeps its own tab, and the workspace's active tab
-        // follows whichever is key.
-        let state = makeAppState()
-        let (project, ws) = try seedProject(state, tabs: 2)
-        let a = WindowState(activeProjectID: project.id)
-        let b = WindowState(activeProjectID: project.id)
-        state.registerWindow(a)
-        state.registerWindow(b)
-        state.noteKeyWindow(a)
-        let aTab = try #require(state.displayedTab(for: project.id, in: a))
-        let bTab = try #require(state.displayedTab(for: project.id, in: b))
+        let mirror = try #require(state.viewTab(for: project.id, in: b)).tab
 
         state.noteKeyWindow(b)
-        #expect(ws.activeTabID == bTab.id)
-        #expect(state.displayedTab(for: project.id, in: a)?.id == aTab.id)
-        #expect(state.displayedTab(for: project.id, in: b)?.id == bTab.id)
+        #expect(state.viewTab(for: project.id, in: a)?.isMirror == false)
+        #expect(state.viewTab(for: project.id, in: b)?.tab === mirror, "the same shadow, not a rebuilt one")
 
         state.noteKeyWindow(a)
-        #expect(ws.activeTabID == aTab.id)
-        #expect(state.displayedTab(for: project.id, in: b)?.id == bTab.id)
+        #expect(state.viewTab(for: project.id, in: b)?.tab === mirror)
+    }
+
+    @Test
+    func selecting_a_tab_another_window_owns_yields_a_mirror_not_a_steal() throws {
+        let state = makeAppState()
+        let (project, ws) = try seedProject(state, tabs: 2)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        let first = ws.tabs[0], second = ws.tabs[1]
+        state.selectTab(first.id, projectID: project.id)
+        state.selectTab(second.id, projectID: project.id, in: b)
+        #expect(state.viewTab(for: project.id, in: b)?.isMirror == false, "b owns the second tab")
+
+        state.selectTab(second.id, projectID: project.id)
+
+        #expect(ws.activeTabID == second.id)
+        let viewA = try #require(state.viewTab(for: project.id, in: a))
+        #expect(viewA.isMirror, "the key window mirrors rather than taking the panes")
+        #expect(viewA.mirrorOf === second)
+        #expect(state.viewTab(for: project.id, in: b)?.isMirror == false)
+    }
+
+    @Test
+    func a_mirror_view_is_rebuilt_when_the_real_tab_changes_shape() throws {
+        let state = makeAppState()
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let real = try #require(ws.activeTab)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        let before = try #require(state.viewTab(for: project.id, in: b)).tab
+        #expect(before.splitRoot.allPanes().count == 1)
+
+        let source = try #require(real.splitRoot.allPanes().first)
+        _ = try #require(state.splitPane(
+            source.id, direction: .vertical, projectID: project.id, projectDirectory: "/tmp"
+        ))
+
+        let after = try #require(state.viewTab(for: project.id, in: b)).tab
+        #expect(after !== before)
+        #expect(after.splitRoot.allPanes().count == 2)
+        #expect(after.splitRoot.shapeSignature == real.splitRoot.shapeSignature)
+    }
+
+    @Test
+    func a_mirror_view_is_dropped_when_its_window_moves_on() throws {
+        let state = makeAppState()
+        let (project, ws) = try seedProject(state, tabs: 2)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        // The key window holds the first tab, so b's selection of it mirrors.
+        state.selectTab(ws.tabs[0].id, projectID: project.id)
+        state.selectTab(ws.tabs[0].id, projectID: project.id, in: b)
+        #expect(state.viewTab(for: project.id, in: b)?.isMirror == true)
+        #expect(b.shadowTabs.count == 1)
+
+        state.selectTab(ws.tabs[1].id, projectID: project.id, in: b)
+
+        #expect(b.shadowTabs.isEmpty)
+        #expect(state.viewTab(for: project.id, in: b)?.isMirror == false)
+    }
+
+    @Test
+    func mirror_view_panes_take_part_in_leadership() throws {
+        // The mirror's pane is a real zmx client: focusing it claims the pty
+        // and dims the real pane in the other window.
+        let state = makeAppState()
+        state.sendClaim = { _ in true }
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let real = try #require(ws.activeTab)
+        let realPane = try #require(real.splitRoot.allPanes().first)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        let view = try #require(state.viewTab(for: project.id, in: b))
+        let mirrorPane = try #require(view.tab.splitRoot.allPanes().first)
+        #expect(state.isMirrored(realPane))
+        #expect(state.isLeader(realPane), "the real pane leads until a mirror is focused")
+
+        state.focusMirroredPane(mirrorPane.id, in: view)
+
+        #expect(state.isLeader(mirrorPane))
+        #expect(state.nonLeaderPaneIDs(in: real) == [realPane.id])
+        #expect(real.focusedPaneID == realPane.id, "focus wrote through to the real tab")
     }
 
     @Test
@@ -390,7 +459,7 @@ struct WindowStateTests {
         let created = ws.createTab(projectPath: "/tmp")
 
         #expect(a.activeTabIDs[project.id] == created.id)
-        #expect(state.displayedTab(for: project.id, in: a)?.id == created.id)
+        #expect(state.selectedTab(for: project.id, in: a)?.id == created.id)
     }
 
     @Test
@@ -408,41 +477,7 @@ struct WindowStateTests {
         state.selectTab(third.id, projectID: project.id, in: b)
 
         #expect(ws.activeTabID == before, "a background selection leaves the key window alone")
-        #expect(state.displayedTab(for: project.id, in: b)?.id == third.id)
-    }
-
-    @Test
-    func mirroring_a_tab_attaches_every_session_a_second_time() throws {
-        // How the same work reaches two windows: the tab renders once, but its
-        // sessions can be attached any number of times.
-        let state = makeAppState()
-        let (project, ws) = try seedProject(state, tabs: 1)
-        let source = try #require(ws.activeTab)
-        let a = WindowState(activeProjectID: project.id)
-        let b = WindowState(activeProjectID: project.id)
-        state.registerWindow(a)
-        state.registerWindow(b)
-        state.noteKeyWindow(a)
-        let sourcePane = try #require(source.splitRoot.allPanes().first)
-        _ = try #require(state.splitPane(
-            sourcePane.id,
-            direction: .horizontal, projectID: project.id, projectDirectory: "/tmp"
-        ))
-        let sourceSessions = source.splitRoot.allPanes().map(\.sessionName)
-
-        let mirrorID = try #require(state.mirrorTab(source.id, projectID: project.id, in: b))
-        let mirror = try #require(ws.tabs.first { $0.id == mirrorID })
-
-        #expect(mirror.splitRoot.allPanes().map(\.sessionName) == sourceSessions)
-        #expect(mirror.splitRoot.allPanes().allSatisfy { $0.command == nil })
-        #expect(state.displayedTab(for: project.id, in: b)?.id == mirrorID)
-        #expect(ws.activeTabID == source.id, "the key window keeps its tab")
-        for pane in source.splitRoot.allPanes() {
-            #expect(state.isLeader(pane))
-        }
-        for pane in mirror.splitRoot.allPanes() {
-            #expect(!state.isLeader(pane))
-        }
+        #expect(state.selectedTab(for: project.id, in: b)?.id == third.id)
     }
 
     @Test
@@ -463,6 +498,7 @@ struct WindowStateTests {
         writer.selectProject(q)
         let w1 = WindowState(activeProjectID: p.id)
         let w2 = WindowState(activeProjectID: q.id, sidebarWidth: 333)
+        w2.sidebarVisible = false
         writer.registerWindow(w1)
         writer.registerWindow(w2)
         writer.noteKeyWindow(w2)
@@ -480,6 +516,221 @@ struct WindowStateTests {
         #expect(first.activeProjectID == p.id)
         #expect(second.activeProjectID == q.id)
         #expect(second.sidebarWidth == 333)
+        #expect(!second.sidebarVisible, "sidebar visibility is the window's own, restored with it")
+    }
+
+    @Test
+    func a_window_the_user_opens_comes_up_at_the_default_sidebar_state() {
+        // Not at whatever was last dragged in some other (possibly since
+        // closed) window, and never collapsed.
+        let previous = Preferences.shared.sidebarWidth
+        defer { Preferences.shared.sidebarWidth = previous }
+        Preferences.shared.sidebarWidth = 333
+        let state = makeAppState()
+        let project = Project(name: "p", path: "/tmp", sortOrder: 0)
+        state.restoreSelection(projects: [project])
+        let first = WindowState()
+        state.registerWindow(first)
+        state.noteKeyWindow(first)
+        state.restoreWindows(adopting: first)
+        #expect(state.hasRestoredWindows)
+
+        let opened = WindowState()
+        opened.sidebarVisible = false
+        state.registerWindow(opened)
+
+        #expect(opened.sidebarWidth == Preferences.defaultSidebarWidth)
+        #expect(opened.sidebarVisible)
+    }
+
+    @Test
+    func becoming_key_claims_leadership_for_every_pane_of_the_windows_tab() throws {
+        // Leadership is per tab, driven by the key window: fronting the other
+        // window must hand the pty to all of its panes at once, without a
+        // click in each.
+        let state = makeAppState()
+        var claimed: [UUID] = []
+        state.sendClaim = { claimed.append($0.id)
+            return true
+        }
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let real = try #require(ws.activeTab)
+        let source = try #require(real.splitRoot.allPanes().first)
+        _ = try #require(state.splitPane(
+            source.id, direction: .horizontal, projectID: project.id, projectDirectory: "/tmp"
+        ))
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        let mirror = try #require(state.viewTab(for: project.id, in: b)).tab
+        claimed = []
+
+        state.noteKeyWindow(b)
+        #expect(Set(claimed) == Set(mirror.splitRoot.allPanes().map(\.id)))
+        #expect(state.nonLeaderPaneIDs(in: real) == Set(real.splitRoot.allPanes().map(\.id)))
+        #expect(state.nonLeaderPaneIDs(in: mirror).isEmpty)
+
+        claimed = []
+        state.noteKeyWindow(a)
+        #expect(Set(claimed) == Set(real.splitRoot.allPanes().map(\.id)))
+        #expect(state.nonLeaderPaneIDs(in: real).isEmpty)
+    }
+
+    @Test
+    func becoming_key_leaves_a_same_tab_mirror_pairs_leader_alone() throws {
+        // `pane mirror` puts two panes on one session in ONE tab. The whole-tab
+        // claim must not hand the pty to whichever pane comes last in tree
+        // order — the source lost leadership to its own mirror on every key
+        // change.
+        let state = makeAppState()
+        var claimed: [UUID] = []
+        state.sendClaim = { claimed.append($0.id)
+            return true
+        }
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let tab = try #require(ws.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        _ = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: project.id))
+        let a = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        claimed = []
+
+        state.noteKeyWindow(a)
+
+        #expect(claimed.isEmpty, "the source already leads; nothing moves")
+        #expect(state.isLeader(source))
+    }
+
+    @Test
+    func the_first_remaining_window_becomes_key_when_the_key_window_closes() {
+        // AppKit reports the new key window only while the app is active; a
+        // headless harness never sees it, and every window read as unfocused.
+        let state = makeAppState()
+        let a = WindowState()
+        let b = WindowState()
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(b)
+
+        state.unregisterWindow(b)
+
+        #expect(state.keyWindowID == a.id)
+    }
+
+    @Test
+    func a_window_keeps_its_tab_when_the_key_window_switches_tabs() throws {
+        // A window with no record of its own used to fall back to the
+        // workspace's active tab — the KEY window's — and so followed every
+        // tab switch made in the other window, rebuilding its mirror each time.
+        let state = makeAppState()
+        let (project, ws) = try seedProject(state, tabs: 2)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        let shown = try #require(state.selectedTab(for: project.id, in: b))
+        let other = try #require(ws.tabs.first { $0.id != shown.id })
+
+        state.selectTab(other.id, projectID: project.id)
+
+        #expect(state.selectedTab(for: project.id, in: a)?.id == other.id)
+        #expect(state.selectedTab(for: project.id, in: b)?.id == shown.id, "b stays where it was")
+    }
+
+    @Test
+    func a_rebuilt_mirror_does_not_leave_the_key_window_trusting_a_stale_record() throws {
+        // b (key) leads through its mirror. A split in the real tab rebuilds
+        // b's mirror: its old clients detach and the record for them is
+        // stale. When a becomes key it must CLAIM, not skip on the tree-order
+        // guess that its own panes already lead — zmx has handed leadership to
+        // whichever client attached next.
+        let state = makeAppState()
+        var claimed: [UUID] = []
+        state.sendClaim = { claimed.append($0.id)
+            return true
+        }
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let real = try #require(ws.activeTab)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        state.noteKeyWindow(b)
+        #expect(state.viewTab(for: project.id, in: b)?.isMirror == true)
+        let source = try #require(real.splitRoot.allPanes().first)
+        _ = try #require(state.splitPane(
+            source.id, direction: .horizontal, projectID: project.id, projectDirectory: "/tmp"
+        ))
+        _ = state.viewTab(for: project.id, in: b) // rebuilds the mirror, retiring the old one
+        claimed = []
+
+        state.noteKeyWindow(a)
+
+        #expect(Set(claimed) == Set(real.splitRoot.allPanes().map(\.id)))
+        for pane in real.splitRoot.allPanes() {
+            #expect(state.isLeader(pane))
+        }
+    }
+
+    @Test
+    func a_mirror_client_coming_up_elsewhere_makes_the_key_window_reassert() throws {
+        // A fresh client on a session the key window leads is exactly what
+        // zmx makes leader when the previous leader detached, so the key
+        // window claims again rather than trusting its record.
+        let state = makeAppState()
+        var claimed: [UUID] = []
+        state.sendClaim = { claimed.append($0.id)
+            return true
+        }
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let realPane = try #require(ws.activeTab?.splitRoot.allPanes().first)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(a)
+        let mirrorPane = try #require(state.viewTab(for: project.id, in: b)?.tab.splitRoot.allPanes().first)
+        #expect(state.isLeader(realPane))
+        claimed = []
+
+        state.surfaceDidGetSize(paneID: mirrorPane.id)
+
+        #expect(claimed == [realPane.id])
+        #expect(state.isLeader(realPane))
+    }
+
+    @Test
+    func a_surface_that_gets_its_size_in_the_key_windows_tab_claims_leadership() throws {
+        // The claim on key change is refused until a mirror's surface has a
+        // size; the surface-sized report re-sends it.
+        let state = makeAppState()
+        var deliverable = false
+        var claimed: [UUID] = []
+        state.sendClaim = { pane in
+            guard deliverable else { return false }
+            claimed.append(pane.id)
+            return true
+        }
+        let (project, ws) = try seedProject(state, tabs: 1)
+        let real = try #require(ws.activeTab)
+        let a = WindowState(activeProjectID: project.id)
+        let b = WindowState(activeProjectID: project.id)
+        state.registerWindow(a)
+        state.registerWindow(b)
+        state.noteKeyWindow(b)
+        let mirrorPane = try #require(state.viewTab(for: project.id, in: b)?.tab.splitRoot.allPanes().first)
+        #expect(claimed.isEmpty, "nothing recorded while undeliverable")
+        #expect(try state.isLeader(#require(real.splitRoot.allPanes().first)))
+
+        deliverable = true
+        state.surfaceDidGetSize(paneID: mirrorPane.id)
+
+        #expect(claimed == [mirrorPane.id])
+        #expect(state.isLeader(mirrorPane))
     }
 
     @Test
