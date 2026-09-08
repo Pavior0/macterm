@@ -18,34 +18,38 @@ extension View {
         }
     }
 
-    /// A dragged preview lives in a full-width overlay, whose layout proposal
-    /// would otherwise stretch the tab to its maximum width. Preserve the
-    /// measured source geometry so both the capsule and its glass sampling
-    /// region remain identical while dragging.
+    /// A dragged preview lives in a full-width overlay, so preserve its source
+    /// geometry instead of letting the overlay's layout proposal resize it.
     @ViewBuilder
     func horizontalTabSize(
         fixedSize: CGSize?,
-        minimumWidth: CGFloat,
-        maximumWidth: CGFloat
+        width: CGFloat
     ) -> some View {
         if let fixedSize {
-            frame(width: fixedSize.width, height: fixedSize.height)
+            frame(
+                width: fixedSize.width,
+                height: fixedSize.height,
+                alignment: .leading
+            )
         } else {
-            frame(minWidth: minimumWidth, maxWidth: maximumWidth, minHeight: 26)
+            frame(width: width, alignment: .leading)
+                .frame(minHeight: 26)
         }
     }
 
     /// Keep the active tab on native Liquid Glass while clipping the effect to
-    /// its capsule. macOS 27 lets title-bar accessories draw outside their
-    /// bounds; the explicit clip prevents glass depth from becoming a halo.
+    /// its rounded shape. macOS 27 lets title-bar accessories draw outside
+    /// their bounds; the explicit clip prevents glass depth from becoming a
+    /// halo.
     @ViewBuilder
     func horizontalActiveTabMaterial(isActive: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
         if isActive {
             if #available(macOS 26.0, *) {
-                glassEffect(.regular, in: .capsule)
-                    .clipShape(Capsule(style: .continuous))
+                glassEffect(.regular, in: .rect(cornerRadius: 7))
+                    .clipShape(shape)
             } else {
-                background(.regularMaterial, in: Capsule(style: .continuous))
+                background(.regularMaterial, in: shape)
             }
         } else {
             self

@@ -18,6 +18,7 @@ struct HorizontalWorkspaceTab: View {
     let projectDirectory: String?
     let isActive: Bool
     let showsTabIndexHint: Bool
+    let tabWidth: CGFloat
     var hoverSuppressed = false
     var hoverEnabled = true
     var fixedSize: CGSize?
@@ -28,11 +29,6 @@ struct HorizontalWorkspaceTab: View {
     private var tabIndexNumber: Int { index + 1 }
     private var trailingAccessoryPadding: CGFloat {
         max(28, CGFloat(String(tabIndexNumber).count * 6 + 15))
-    }
-
-    private var tabMaximumWidth: CGFloat {
-        guard tab.customTitle == nil, panes.count > 1 else { return 220 }
-        return min(CGFloat(panes.count) * 112 + 32, 380)
     }
 
     var body: some View {
@@ -70,24 +66,23 @@ struct HorizontalWorkspaceTab: View {
                     }
                 }
                 .foregroundStyle(isActive ? .primary : .secondary)
-                .padding(.leading, isActive ? 16 : 9)
+                .padding(.leading, 9)
                 // Reserve the widest trailing accessory even while it is
                 // hidden, so Command hints and hover never cover or shift the
                 // title. The normal 28pt slot also fits two-digit indices.
                 .padding(.trailing, trailingAccessoryPadding)
                 .horizontalTabSize(
                     fixedSize: fixedSize,
-                    minimumWidth: isActive ? 94 : 78,
-                    maximumWidth: tabMaximumWidth
+                    width: tabWidth
                 )
                 .background {
                     if !isActive, isHovering {
-                        Capsule(style: .continuous)
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
                             .fill(Color.primary.opacity(0.10))
                     }
                 }
                 .horizontalActiveTabMaterial(isActive: isActive)
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
             .buttonStyle(.plain)
 

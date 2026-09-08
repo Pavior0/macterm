@@ -5,6 +5,10 @@ import SwiftUI
 
 struct HorizontalWorkspaceTabs: View {
     private static let coordinateSpace = "horizontal-workspace-tab-strip"
+    private static let preferredTabWidth: CGFloat = 152
+    private static let minimumTabWidth: CGFloat = 96
+    private static let tabSpacing: CGFloat = 4
+    private static let tabStripPadding: CGFloat = 1
 
     private var modifierKeyState: ModifierKeyState { .shared }
 
@@ -36,104 +40,112 @@ struct HorizontalWorkspaceTabs: View {
     let project: Project?
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 4) {
-                    ForEach(Array(workspace.tabs.enumerated()), id: \.element.id) { index, tab in
-                        HorizontalWorkspaceTab(
-                            tab: tab,
-                            index: index,
-                            projectDirectory: project?.id == PinnedTabs.projectID ? nil : project?.path,
-                            isActive: tab.id == workspace.activeTabID,
-                            showsTabIndexHint: modifierKeyState.isCommandPressed,
-                            hoverSuppressed: draggedTabID != nil || isContextMenuTracking,
-                            onSelect: {
-                                appState.selectTab(tab.id, projectID: workspace.projectID)
-                            },
-                            onClose: {
-                                appState.requestCloseTab(tab.id, projectID: workspace.projectID)
-                            }
-                        )
-                        .id(tab.id)
-                        .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: HorizontalTabFramePreferenceKey.self,
-                                    value: [
-                                        tab.id: geometry.frame(
-                                            in: .named(Self.coordinateSpace)
-                                        ),
-                                    ]
-                                )
-                            }
-                        }
-                        // The real row keeps its slot in layout but disappears
-                        // under the pointer-following preview drawn above the strip.
-                        .opacity(draggedTabID == tab.id ? 0 : 1)
-                        .highPriorityGesture(
-                            DragGesture(
-                                minimumDistance: 4,
-                                coordinateSpace: .named(Self.coordinateSpace)
+        GeometryReader { geometry in
+            let resolvedTabWidth = tabWidth(for: geometry.size.width)
+
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: Self.tabSpacing) {
+                        ForEach(Array(workspace.tabs.enumerated()), id: \.element.id) { index, tab in
+                            HorizontalWorkspaceTab(
+                                tab: tab,
+                                index: index,
+                                projectDirectory: project?.id == PinnedTabs.projectID ? nil : project?.path,
+                                isActive: tab.id == workspace.activeTabID,
+                                showsTabIndexHint: modifierKeyState.isCommandPressed,
+                                tabWidth: resolvedTabWidth,
+                                hoverSuppressed: draggedTabID != nil || isContextMenuTracking,
+                                onSelect: {
+                                    appState.selectTab(tab.id, projectID: workspace.projectID)
+                                },
+                                onClose: {
+                                    appState.requestCloseTab(tab.id, projectID: workspace.projectID)
+                                }
                             )
-                            .onChanged { value in
-                                updateTabDrag(
-                                    tabID: tab.id,
-                                    startLocation: value.startLocation,
-                                    location: value.location
-                                )
-                            }
-                            .onEnded { _ in
-                                withAnimation(reduceMotion ? nil : .smooth(duration: 0.12)) {
-                                    draggedTabID = nil
-                                    dragLocation = nil
-                                    dragSourceSize = nil
+                            .id(tab.id)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: HorizontalTabFramePreferenceKey.self,
+                                        value: [
+                                            tab.id: geometry.frame(
+                                                in: .named(Self.coordinateSpace)
+                                            ),
+                                        ]
+                                    )
                                 }
                             }
-                        )
-                        .contextMenu {
-                            tabContextMenu(tab: tab, index: index)
-                        }
-                        .overlay(alignment: .trailing) {
-                            if showsSeparator(after: index) {
-                                Rectangle()
-                                    .fill(MactermTheme.fgDim.opacity(0.28))
-                                    .frame(width: 1, height: 12)
-                                    .offset(x: 2)
-                                    .allowsHitTesting(false)
+                            // The real row keeps its slot in layout but disappears
+                            // under the pointer-following preview drawn above the strip.
+                            .opacity(draggedTabID == tab.id ? 0 : 1)
+                            .highPriorityGesture(
+                                DragGesture(
+                                    minimumDistance: 4,
+                                    coordinateSpace: .named(Self.coordinateSpace)
+                                )
+                                .onChanged { value in
+                                    updateTabDrag(
+                                        tabID: tab.id,
+                                        startLocation: value.startLocation,
+                                        location: value.location
+                                    )
+                                }
+                                .onEnded { _ in
+                                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.12)) {
+                                        draggedTabID = nil
+                                        dragLocation = nil
+                                        dragSourceSize = nil
+                                    }
+                                }
+                            )
+                            .contextMenu {
+                                tabContextMenu(tab: tab, index: index)
+                            }
+                            .overlay(alignment: .trailing) {
+                                if showsSeparator(after: index) {
+                                    Rectangle()
+                                        .fill(MactermTheme.fgDim.opacity(0.28))
+                                        .frame(width: 1, height: 12)
+                                        .offset(x: 2)
+                                        .allowsHitTesting(false)
+                                }
                             }
                         }
                     }
+                    .padding(.horizontal, Self.tabStripPadding)
+                    .animation(reduceMotion ? nil : .smooth(duration: 0.16), value: workspace.tabs.map(\.id))
                 }
-                .padding(.horizontal, 1)
-                .animation(reduceMotion ? nil : .smooth(duration: 0.16), value: workspace.tabs.map(\.id))
-            }
-            .coordinateSpace(name: Self.coordinateSpace)
-            .onPreferenceChange(HorizontalTabFramePreferenceKey.self) { frames in
-                tabFrames = frames
-            }
-            .overlay(alignment: .topLeading) {
-                draggedTabPreview
-            }
-            .onAppear {
-                Task { @MainActor in
-                    await Task.yield()
+                .coordinateSpace(name: Self.coordinateSpace)
+                .onPreferenceChange(HorizontalTabFramePreferenceKey.self) { frames in
+                    tabFrames = frames
+                }
+                .overlay(alignment: .topLeading) {
+                    draggedTabPreview(tabWidth: resolvedTabWidth)
+                }
+                .onAppear {
+                    Task { @MainActor in
+                        await Task.yield()
+                        scrollToActiveTab(proxy, animated: false)
+                    }
+                }
+                .onChange(of: workspace.activeTabID) {
+                    scrollToActiveTab(proxy, animated: true)
+                }
+                .onChange(of: workspace.tabs.count) {
+                    scrollToActiveTab(proxy, animated: true)
+                }
+                .onChange(of: geometry.size.width) {
                     scrollToActiveTab(proxy, animated: false)
                 }
-            }
-            .onChange(of: workspace.activeTabID) {
-                scrollToActiveTab(proxy, animated: true)
-            }
-            .onChange(of: workspace.tabs.count) {
-                scrollToActiveTab(proxy, animated: true)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-                isContextMenuTracking = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
-                isContextMenuTracking = false
+                .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+                    isContextMenuTracking = true
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                    isContextMenuTracking = false
+                }
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26)
         .alert("Rename Tab", isPresented: renameIsPresented) {
             TextField("Tab name", text: $renameText)
             Button("Cancel", role: .cancel) {
@@ -143,6 +155,20 @@ struct HorizontalWorkspaceTabs: View {
                 commitTabRename()
             }
         }
+    }
+
+    private func tabWidth(for availableWidth: CGFloat) -> CGFloat {
+        let tabCount = workspace.tabs.count
+        guard tabCount > 0, availableWidth.isFinite, availableWidth > 0 else {
+            return Self.preferredTabWidth
+        }
+        let totalSpacing = CGFloat(max(0, tabCount - 1)) * Self.tabSpacing
+        let contentWidth = max(
+            0,
+            availableWidth - totalSpacing - Self.tabStripPadding * 2
+        )
+        let equalWidth = contentWidth / CGFloat(tabCount)
+        return min(Self.preferredTabWidth, max(Self.minimumTabWidth, equalWidth))
     }
 
     private var renameIsPresented: Binding<Bool> {
@@ -252,7 +278,7 @@ struct HorizontalWorkspaceTabs: View {
     }
 
     @ViewBuilder
-    private var draggedTabPreview: some View {
+    private func draggedTabPreview(tabWidth: CGFloat) -> some View {
         if let draggedTabID,
            let dragLocation,
            let draggedTab = workspace.tabs.first(where: { $0.id == draggedTabID }),
@@ -264,6 +290,7 @@ struct HorizontalWorkspaceTabs: View {
                 projectDirectory: project?.id == PinnedTabs.projectID ? nil : project?.path,
                 isActive: draggedTab.id == workspace.activeTabID,
                 showsTabIndexHint: modifierKeyState.isCommandPressed,
+                tabWidth: tabWidth,
                 hoverSuppressed: true,
                 hoverEnabled: false,
                 fixedSize: dragSourceSize,
