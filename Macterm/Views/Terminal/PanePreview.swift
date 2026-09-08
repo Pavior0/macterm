@@ -42,9 +42,6 @@ struct PanePreview {
     /// The pane's effective background — the card's fill either way, so an
     /// image-less card still reads as that pane's terminal.
     let background: NSColor
-    /// The frame's own width/height at capture time, so a card can be shaped
-    /// to what was actually captured instead of cropping it to fit.
-    let aspectRatio: CGFloat?
     /// The terminal's column count, so the text fallback can be typeset at the
     /// scale a real thumbnail of this pane would have been.
     ///
@@ -76,7 +73,7 @@ enum PanePreviewCapture {
         let background = pane.adaptiveBackgroundColor.map { NSColor(cgColor: $0) ?? MactermTheme.nsBg }
             ?? MactermTheme.nsBg
         guard let view = pane.nsView else {
-            return PanePreview(image: nil, lines: [], background: background, aspectRatio: nil, columns: nil)
+            return PanePreview(image: nil, lines: [], background: background, columns: nil)
         }
 
         let image = (view.layer?.contents as? IOSurface).flatMap {
@@ -85,13 +82,11 @@ enum PanePreviewCapture {
         // The text read is the fallback, so skip it whenever a frame exists —
         // it walks the whole viewport in the core.
         let lines = image == nil ? viewportLines(of: view) : []
-        let aspect = image.map { $0.size.width / max($0.size.height, 1) }
         let columns = image == nil ? view.surfaceSize.map { Int($0.columns) } : nil
         return PanePreview(
             image: image,
             lines: lines,
             background: background,
-            aspectRatio: aspect,
             columns: columns
         )
     }

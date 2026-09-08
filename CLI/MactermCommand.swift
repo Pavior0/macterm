@@ -15,6 +15,7 @@ struct MactermCommand: ParsableCommand {
             Status.self,
             ProjectCommand.self,
             TabCommand.self,
+            WindowCommand.self,
             PaneCommand.self,
             Grid.self,
             SessionCommand.self,
@@ -152,10 +153,15 @@ struct ProjectCommand: ParsableCommand {
         @Argument(help: "Project name, UUID, or index.")
         var project: String
 
+        @Option(help: "Window to select it in (index or id). Defaults to the focused window.")
+        var window: String?
+
         @OptionGroup var options: ConnectionOptions
 
         func run() throws {
-            try runControlCommand(command: "project.select", args: ControlArgs(project: project), options: options)
+            var args = ControlArgs(project: project)
+            args.window = window
+            try runControlCommand(command: "project.select", args: args, options: options)
         }
     }
 
@@ -208,6 +214,71 @@ struct ProjectCommand: ParsableCommand {
 }
 
 // MARK: - Tab
+
+struct WindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "window",
+        abstract: "List, open and close terminal windows.",
+        subcommands: [List.self, New.self, Focus.self, Close.self],
+        defaultSubcommand: List.self
+    )
+
+    struct Focus: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Bring a window to the front and make it key."
+        )
+
+        @Argument(help: "Window to focus (index or id).")
+        var window: String
+
+        @OptionGroup var options: ConnectionOptions
+
+        func run() throws {
+            var args = ControlArgs()
+            args.window = window
+            try runControlCommand(command: "window.focus", args: args, options: options)
+        }
+    }
+
+    struct List: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "List open windows and the project each is showing."
+        )
+
+        @OptionGroup var options: ConnectionOptions
+
+        func run() throws {
+            try runControlCommand(command: "window.list", args: ControlArgs(), options: options)
+        }
+    }
+
+    struct New: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Open another window.")
+
+        @OptionGroup var options: ConnectionOptions
+
+        func run() throws {
+            try runControlCommand(command: "window.new", args: ControlArgs(), options: options)
+        }
+    }
+
+    struct Close: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Close a window (the last visible one hides instead)."
+        )
+
+        @Option(help: "Window to close (index or id). Defaults to the focused window.")
+        var window: String?
+
+        @OptionGroup var options: ConnectionOptions
+
+        func run() throws {
+            var args = ControlArgs()
+            args.window = window
+            try runControlCommand(command: "window.close", args: args, options: options)
+        }
+    }
+}
 
 struct TabCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -300,14 +371,15 @@ struct TabCommand: ParsableCommand {
         @Option(help: "Project scope. Defaults to the active project.")
         var project: String?
 
+        @Option(help: "Window to select it in (index or id). Defaults to the focused window.")
+        var window: String?
+
         @OptionGroup var options: ConnectionOptions
 
         func run() throws {
-            try runControlCommand(
-                command: "tab.select",
-                args: ControlArgs(project: project, tab: tab),
-                options: options
-            )
+            var args = ControlArgs(project: project, tab: tab)
+            args.window = window
+            try runControlCommand(command: "tab.select", args: args, options: options)
         }
     }
 

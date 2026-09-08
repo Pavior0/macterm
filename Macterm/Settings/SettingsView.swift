@@ -1056,6 +1056,7 @@ private struct AppearanceSettings: View {
     @State private var peekSidebarWhenHidden: Bool = Preferences.shared.peekSidebarWhenHidden
     @State private var showNewProjectButton: Bool = Preferences.shared.showNewProjectButton
     @State private var workspaceTabLayout: WorkspaceTabLayout = Preferences.shared.workspaceTabLayout
+    @State private var showProjectNewTabButton: Bool = Preferences.shared.showProjectNewTabButton
     @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
     @State private var showTabSwitcherOverlay: Bool = Preferences.shared.showTabSwitcherOverlay
     @State private var recentTabCandidates: Int = Preferences.shared.recentTabCandidates
@@ -1235,6 +1236,13 @@ private struct AppearanceSettings: View {
                     .onChange(of: showNewProjectButton) { _, v in Preferences.shared.showNewProjectButton = v }
                 Text("When hidden, create projects via the command palette or context menu.")
                     .settingsCaption()
+
+                Toggle("Show new tab button on projects", isOn: $showProjectNewTabButton)
+                    .onChange(of: showProjectNewTabButton) { _, v in
+                        Preferences.shared.showProjectNewTabButton = v
+                    }
+                Text("Shows the button while the pointer rests on a project row.")
+                    .settingsCaption()
             }
 
             Section("Tab Switching") {
@@ -1248,11 +1256,16 @@ private struct AppearanceSettings: View {
                 )
                 .settingsCaption()
 
-                Stepper("Recent Tab candidates: \(recentTabCandidates)", value: $recentTabCandidates, in: 2 ... 12)
-                    .onChange(of: recentTabCandidates) { _, v in
-                        Preferences.shared.recentTabCandidates = v
+                Picker("Recent tab count", selection: $recentTabCandidates) {
+                    ForEach(2 ... 12, id: \.self) { count in
+                        Text("\(count)").tag(count)
                     }
-                Text("How many of the most recently used tabs the switcher offers while the shortcut is held.")
+                    Text("Unlimited").tag(0)
+                }
+                .onChange(of: recentTabCandidates) { _, v in
+                    Preferences.shared.recentTabCandidates = v
+                }
+                Text("Number of recent tabs shown in the switcher. Unlimited shows every tab.")
                     .settingsCaption()
             }
 

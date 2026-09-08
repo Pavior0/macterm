@@ -122,6 +122,7 @@ struct TintCutout {
 
     /// Cut `view` (a tinted layer) to the regions, which are in `container`'s
     /// coordinates.
+    @MainActor
     func apply(to view: NSView, in container: NSView) {
         guard let layer = view.layer else { return }
         guard !holes.isEmpty else {
@@ -203,22 +204,24 @@ final class MactermTintBackdropView: NSView {
 // MARK: - Liquid glass background
 
 /// A container that hosts a macOS 26 `NSGlassEffectView` (the real liquid
-/// glass material) under Macterm's own tint layer. Modeled on Ghostty's
-/// `TerminalGlassView` (`TerminalViewContainer.swift`).
+/// glass material) under Macterm's own tint layer. This is the deliberate
+/// divergence from Ghostty, which puts the color *under* its glass (SwiftUI
+/// `.glassEffect`, since fd17869d1): the tint has to sit as a separate layer
+/// above the material so `TintCutout` can cut it out from under a pane.
 ///
-/// **The window's appearance does not depend on key status.** It used to: an
-/// overlay faded a saturation-boosted tint of the background in as the window
-/// resigned key, lifted from the Ghostty of the time, where the tint lived
-/// *inside* the material as `NSGlassEffectView.tintColor` and so took the
-/// material's own inactive desaturation with it — a large enough change to
-/// need compensating for. Macterm's tint is a separate layer above the
-/// material (it has to be, so `TintCutout` can cut it), so it never took that
+/// **The tint does not depend on key status.** It used to: an overlay faded a
+/// saturation-boosted tint of the background in as the window resigned key,
+/// lifted from the Ghostty of the time, where the tint lived *inside* the
+/// material as `NSGlassEffectView.tintColor` and so took the material's own
+/// inactive desaturation with it — a large enough change to need compensating
+/// for. Macterm's tint, being above the material, never took that
 /// desaturation, and the overlay was compensating for something that wasn't
 /// happening: an unfocused window visibly gained opacity, the wallpaper behind
 /// it dropping out (measured 39,39,50 → 29,27,39 through the terminal area).
-/// Ghostty has since dropped its overlay too, along with every key-status
-/// callback, so unfocusing now moves only the material itself. Don't
-/// reintroduce a focus-dependent tint here.
+/// Ghostty has since dropped its overlay too. What remains on unfocus is the
+/// material's own inactive desaturation (and the native sidebar's — blue −5
+/// measured there), which is the only key-status dependency left in the
+/// window's appearance. Don't reintroduce a focus-dependent tint here.
 ///
 /// Macterm inserts this below the window's content view, filling the whole
 /// window — including the region under the titlebar (via a negative top inset
@@ -321,20 +324,25 @@ final class MactermGlassView: NSView {
 enum WindowAppearance {
     /// Horizontal tabs expose the window shell around an inset terminal. Keep
     /// vertical mode's established edge-to-edge terminal background unchanged.
-    private static var mainWindowBackgroundColor: NSColor {
-        Preferences.shared.workspaceTabLayout == .horizontal
-            ? MactermTheme.nsWindowChromeBg
-            : MactermTheme.nsBg
+    private static func mainWindowBackgroundColor(for window: NSWindow) -> NSColor {
+        let background = MactermTheme.nsBg(for: window)
+        return Preferences.shared.workspaceTabLayout == .horizontal
+            ? (background.blended(withFraction: 0.06, of: MactermTheme.nsFg) ?? background)
+            : background
     }
 
     /// Apply the current opacity/blur settings to `window`. Safe to call any
     /// time — re-applies idempotently. Should be called after the window is
-    /// onscreen, on theme changes, and on focus changes (AppKit recreates
-    /// titlebar subviews under us in some cases, e.g. tab bar appearing).
+    /// onscreen, on theme changes, when the window becomes main, and around
+    /// fullscreen transitions (AppKit recreates titlebar subviews under us in
+    /// some cases, e.g. tab bar appearing). Not on key changes: nothing here
+    /// depends on key status (see `MactermGlassView`).
     static func sync(window: NSWindow) {
         let opacity = Preferences.shared.windowOpacity
         let blurRadius = Preferences.shared.windowBlurRadius
-        let bg = mainWindowBackgroundColor
+        // This window's own tint (#345) — never the app-wide one, or a
+        // background window paints the focused window's terminal colour.
+        let bg = mainWindowBackgroundColor(for: window)
         let isTransparent = opacity < 1.0
 
         // Native fullscreen draws its own opaque grey background; widgets show
@@ -422,7 +430,88 @@ enum WindowAppearance {
     /// Once per launch, on the first `sync` that finds a split view laid out —
     /// from then on the column carries SwiftUI's in-session metric, which a
     /// user drag owns and which the peek's expand restores.
-    private static var didRestoreSidebarWidth = false
+    /// Per-window sidebar bookkeeping: whether the width has been restored,
+    /// the width it is waiting for, and its autosave slot.
+    ///
+    /// These were a single app-wide flag and a single stored width, so only
+    /// the FIRST window ever restored and every other opened at SwiftUI's
+    /// content-derived default (#345). Keyed weakly by the window itself, not
+    /// by `ObjectIdentifier`: an identifier is an address, and a closed
+    /// window's address can be handed to the next window allocated — which
+    /// would then read as already restored, or inherit a slot, if the forget
+    /// path had not run. A weak-keyed table drops the record with the window.
+    /// What a window's sidebar should come up as, once the app knows.
+    struct SidebarRestorePlan {
+        let width: CGFloat
+        let visible: Bool
+    }
+
+    private final class SidebarRecord {
+        var restored = false
+        /// nil until the snapshot has been read — the restore waits for it.
+        var plan: (() -> SidebarRestorePlan?)?
+        var autosaveSlot: Int?
+    }
+
+    private static let sidebarRecords = NSMapTable<NSWindow, SidebarRecord>.weakToStrongObjects()
+
+    private static func sidebarRecord(for window: NSWindow) -> SidebarRecord {
+        if let existing = sidebarRecords.object(forKey: window) { return existing }
+        let record = SidebarRecord()
+        sidebarRecords.setObject(record, forKey: window)
+        return record
+    }
+
+    /// Tell the restore what this window's sidebar should come up as.
+    ///
+    /// `plan` is evaluated when the restore actually runs and may answer nil
+    /// for "not yet": the window arms this as it attaches, which is before the
+    /// launch task has read the saved windows out of the snapshot — a value
+    /// captured here was sometimes the pre-restore default, and the first cut
+    /// of this restored 144 over 144.
+    ///
+    /// The restore is then RETRIED across run-loop ticks until it lands.
+    /// `sync` runs at attach and on became-main; at attach the split view is
+    /// usually not laid out yet, so a window that never became main sat at
+    /// SwiftUI's content-derived minimum until the user focused it — the
+    /// reported "restored window has a minimum-width sidebar until I click
+    /// it". Bounded, so a window that never lays out cannot spin.
+    static func armSidebarWidthRestore(for window: NSWindow, plan: @escaping () -> SidebarRestorePlan?) {
+        let record = sidebarRecord(for: window)
+        guard !record.restored else { return }
+        record.plan = plan
+        retrySidebarRestore(window, remaining: 80)
+    }
+
+    private static func retrySidebarRestore(_ window: NSWindow, remaining: Int) {
+        guard remaining > 0 else {
+            logger.warning("sidebar restore gave up: split view never became ready")
+            return
+        }
+        Task { @MainActor [weak window] in
+            try? await Task.sleep(for: .milliseconds(50))
+            guard let window, let record = sidebarRecords.object(forKey: window), !record.restored else { return }
+            restoreSidebarWidth(window: window)
+            if !record.restored { retrySidebarRestore(window, remaining: remaining - 1) }
+        }
+    }
+
+    /// Whether `window` is still waiting to have its sidebar restored.
+    ///
+    /// While it is, the column is showing SwiftUI's content-derived width, and
+    /// recording that would overwrite the width being restored with the
+    /// default it is meant to replace.
+    static func isAwaitingSidebarWidthRestore(for window: NSWindow?) -> Bool {
+        guard let window, let record = sidebarRecords.object(forKey: window) else { return false }
+        return record.plan != nil && !record.restored
+    }
+
+    static func forgetSidebarWidthRestore(for window: NSWindow) {
+        if let slot = sidebarRecords.object(forKey: window)?.autosaveSlot {
+            clearSidebarAutosave(slot: slot)
+        }
+        sidebarRecords.removeObject(forKey: window)
+    }
 
     /// The actual native sidebar state after AppKit has restored its split-view
     /// autosave. SwiftUI's `columnVisibility` binding can still say `.automatic`
@@ -437,25 +526,36 @@ enum WindowAppearance {
 
     private static func restoreSidebarWidth(window: NSWindow) {
         guard Preferences.shared.workspaceTabLayout == .vertical,
-              !didRestoreSidebarWidth,
+              let record = sidebarRecords.object(forKey: window),
+              !record.restored,
               let split = window.contentView?.firstSplitView,
               split.arrangedSubviews.count > 1,
               let sidebar = split.owningSplitViewController?.splitViewItems.first
         else { return }
-        // Consumed as soon as the split view exists, collapsed or not. `sync`
-        // also runs on every window-became-main, so an arm left standing would
-        // later snap a width the user had since dragged.
-        didRestoreSidebarWidth = true
-        pinSidebarAutosaveName(split: split)
-        // A sidebar the user left hidden must stay hidden: moving divider 0 on
-        // a collapsed item is what would pop it open on every launch. Showing
-        // it mid-session then gives SwiftUI's own width — the next launch with
-        // it visible restores properly.
-        guard !sidebar.isCollapsed else { return }
-        // The frozen launch value, never the live property — see its doc.
-        let width = CGFloat(Preferences.shared.launchSidebarWidth)
-        split.setPosition(width, ofDividerAt: 0)
-        logger.info("sidebar width restored to \(width, privacy: .public)")
+        // The snapshot has not been read yet: the retry comes back.
+        guard let plan = record.plan?() else { return }
+        pinSidebarAutosaveName(split: split, window: window)
+        // The window's own record decides visibility (#345), not the state
+        // AppKit autosaved for this slot. A hidden sidebar has no width to
+        // restore: consume, and leave it collapsed for SwiftUI's column
+        // binding, which follows the same record.
+        if !plan.visible {
+            record.restored = true
+            record.plan = nil
+            return
+        }
+        // Visible by record but collapsed on screen — AppKit's autosaved
+        // state, or SwiftUI mid-uncollapse. Moving divider 0 on a collapsed
+        // item is what used to pop hidden sidebars open on every launch, so
+        // uncollapse deliberately first; the width lands on the next pass.
+        if sidebar.isCollapsed {
+            sidebar.isCollapsed = false
+            return
+        }
+        record.restored = true
+        record.plan = nil
+        split.setPosition(plan.width, ofDividerAt: 0)
+        logger.info("sidebar width restored to \(plan.width, privacy: .public)")
     }
 
     /// Move the live main-window sidebar divider to an explicit width.
@@ -559,10 +659,59 @@ enum WindowAppearance {
     /// dependable here.
     private static let sidebarAutosaveName = "MactermMainSidebar"
 
-    private static func pinSidebarAutosaveName(split: NSSplitView) {
-        guard split.autosaveName != sidebarAutosaveName else { return }
-        split.autosaveName = sidebarAutosaveName
+    /// Per-window autosave slots, assigned lowest-free and reused when a
+    /// window closes.
+    ///
+    /// One shared name would have every window writing its frames to the same
+    /// AppKit key, so they fight. A per-window name has to stay BOUNDED,
+    /// though — an unstable one is exactly what produced the unbounded
+    /// `NSSplitView Subview Frames` accumulation `pruneChurnedSidebarAutosaveKeys`
+    /// below exists to clean up (49 keys in one real domain, one per launch).
+    /// A reused slot index is bounded by how many windows are open at once; a
+    /// UUID per window would not be.
+    ///
+    /// Slots colliding across windows would matter if AppKit's autosave were
+    /// the restore path. It is not — `restoreSidebarWidth` is — so this is
+    /// hygiene either way. Stored on the window's `SidebarRecord`.
+    private static func sidebarAutosaveSlot(for window: NSWindow) -> Int {
+        let record = sidebarRecord(for: window)
+        if let existing = record.autosaveSlot { return existing }
+        var taken: Set<Int> = []
+        for case let other as SidebarRecord in sidebarRecords.objectEnumerator() ?? NSEnumerator() {
+            if let slot = other.autosaveSlot { taken.insert(slot) }
+        }
+        var slot = 0
+        while taken.contains(slot) {
+            slot += 1
+        }
+        record.autosaveSlot = slot
+        return slot
+    }
+
+    private static func autosaveName(forSlot slot: Int) -> String {
+        slot == 0 ? sidebarAutosaveName : "\(sidebarAutosaveName).\(slot)"
+    }
+
+    private static func pinSidebarAutosaveName(split: NSSplitView, window: NSWindow) {
+        let name = autosaveName(forSlot: sidebarAutosaveSlot(for: window))
+        guard split.autosaveName != name else { return }
+        split.autosaveName = name
         pruneChurnedSidebarAutosaveKeys()
+    }
+
+    /// Drop the frames AppKit autosaved for a closed window's slot.
+    ///
+    /// Slots are reused, and setting `autosaveName` on a new window's split
+    /// view REAPPLIES whatever the last window at that slot saved — which is
+    /// how a new window inherited a closed window's collapsed sidebar and
+    /// width. Skipped while terminating: the launch path still reads slot 0
+    /// before the window's own record takes over. Reads `UserDefaults.standard`
+    /// for the same reason `pruneChurnedSidebarAutosaveKeys` does — that is
+    /// the only domain AppKit wrote it to — and is likewise skipped under a
+    /// test run.
+    private static func clearSidebarAutosave(slot: Int) {
+        guard !AppTerminationState.isTerminating, !Preferences.isTestRun else { return }
+        UserDefaults.standard.removeObject(forKey: "NSSplitView Subview Frames \(autosaveName(forSlot: slot))")
     }
 
     /// Drop the per-launch keys written before the name was pinned. Matched on
@@ -752,7 +901,7 @@ enum WindowAppearance {
 
     /// Install (if needed) and configure the liquid-glass background view so it
     /// fills the window behind SwiftUI's content, including the area under the
-    /// titlebar. Follows Ghostty's `updateGlassEffectIfNeeded` pattern.
+    /// titlebar. Installed once per window, then reconfigured in place.
     private static func syncGlass(window: NSWindow, backgroundColor: NSColor, opacity: Double) {
         guard #available(macOS 26.0, *) else { return }
         guard let contentView = window.contentView, let themeFrame = contentView.superview else { return }
@@ -802,22 +951,18 @@ enum WindowAppearance {
     }
 
     /// The window's private corner radius, so the glass clips to the same
-    /// rounded corners as the window. Returns nil when AppKit reports no
-    /// positive radius so SwiftUI can keep its own system container shape.
+    /// rounded corners as the window. Falls back to nil (square) if the SPI
+    /// is unavailable.
     static func windowCornerRadius(_ window: NSWindow) -> CGFloat? {
         if window.responds(to: Selector(("_cornerRadius"))),
-           let radius = window.value(forKey: "_cornerRadius") as? CGFloat,
-           radius > 0
+           let radius = window.value(forKey: "_cornerRadius") as? CGFloat
         {
             return radius
         }
         // Older AppKit builds can expose the applied corner only on the theme
         // frame's backing layer. It is still system-owned geometry, not a
         // guessed OS-version constant.
-        guard let radius = window.contentView?.superview?.layer?.cornerRadius,
-              radius > 0
-        else { return nil }
-        return radius
+        return window.contentView?.superview?.layer?.cornerRadius
     }
 
     /// Apply the Hide Title Bar option (#226) to the window: hide the titlebar
@@ -892,10 +1037,9 @@ enum WindowAppearance {
             titlebarView.layer?.backgroundColor = NSColor.clear.cgColor
         }
 
-        // Horizontal tabs need the theme-derived window shell to continue
-        // through the unified header. AppKit's opaque titlebar background is
-        // otherwise an unrelated white/grey band behind the accessory. Keep
-        // vertical mode's established opaque system chrome unchanged.
+        // NSTitlebarBackgroundView has subviews that force their own background
+        // colors; hide it only when transparent, so the default opaque-mode
+        // chrome stays intact.
         let horizontalTabsPresented = Preferences.shared.workspaceTabLayout == .horizontal
         container.firstDescendant(withClassName: "NSTitlebarBackgroundView")?.isHidden =
             isTransparent || horizontalTabsPresented

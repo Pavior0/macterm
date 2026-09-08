@@ -31,6 +31,9 @@ struct TabSwitcherEntry {
     let index: Int
     let number: Int
     let tab: TerminalTab
+    /// The aspect ratio of the tab's captured terminal composition. Cards use
+    /// this to choose their width while sharing one row height.
+    let previewAspect: CGFloat
 }
 
 struct TabSwitcherOverlay: View {
@@ -40,6 +43,7 @@ struct TabSwitcherOverlay: View {
     var body: some View {
         if let workspace = activeWorkspace, appState.tabCycleTabIDs.count > 1 {
             let entries = tabs(in: workspace)
+            let availableWidth = TabSwitcherStrip.availableWidth
             TabSwitcherPanelPresenter(
                 // The strip renders in its own NSHostingView — a NEW SwiftUI
                 // root — and environment values do not travel with a view
@@ -51,6 +55,7 @@ struct TabSwitcherOverlay: View {
                 content: TabSwitcherStrip(
                     entries: entries,
                     selection: appState.tabCycleSelection,
+                    availableWidth: availableWidth,
                     onHover: { appState.focusTabCycle(at: $0) },
                     onClick: { index in
                         guard let projectID = appState.activeProjectID else { return }
@@ -58,7 +63,10 @@ struct TabSwitcherOverlay: View {
                     }
                 )
                 .environment(appState),
-                contentWidth: TabSwitcherStrip.width(for: entries.count),
+                contentWidth: TabSwitcherStrip.width(
+                    for: entries,
+                    availableWidth: availableWidth
+                ),
                 onCancel: { appState.cancelTabCycle() }
             )
         }
@@ -76,7 +84,16 @@ struct TabSwitcherOverlay: View {
     private func tabs(in workspace: Workspace) -> [TabSwitcherEntry] {
         appState.tabCycleTabIDs.enumerated().compactMap { index, id in
             guard let position = workspace.tabs.firstIndex(where: { $0.id == id }) else { return nil }
-            return TabSwitcherEntry(index: index, number: position + 1, tab: workspace.tabs[position])
+            let tab = workspace.tabs[position]
+            return TabSwitcherEntry(
+                index: index,
+                number: position + 1,
+                tab: tab,
+                previewAspect: TabSwitcherCard.previewAspect(
+                    for: tab.splitRoot,
+                    previews: appState.panePreviews
+                )
+            )
         }
     }
 }
@@ -103,9 +120,8 @@ struct TabSwitcherOverlay: View {
 private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
     let content: Content
     /// The strip's computed width (see `TabSwitcherStrip.width(for:)`). The
-    /// panel's height is MEASURED from the laid-out content in `present` —
-    /// the width has to come from constants because the hosting view needs a
-    /// width proposal before its layout exists to measure.
+    /// panel's height is measured from the laid-out content in `present`; the
+    /// hosting view needs a width proposal before its layout can be measured.
     let contentWidth: CGFloat
     let onCancel: () -> Void
 
@@ -113,8 +129,8 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
         Coordinator()
     }
 
-    func makeNSView(context: Context) -> AnchorView {
-        let view = AnchorView()
+    func makeNSView(context: Context) -> TabSwitcherPanelAnchorView {
+        let view = TabSwitcherPanelAnchorView()
         let coordinator = context.coordinator
         // `updateNSView` can run before SwiftUI inserts the view into the
         // window's hierarchy, when there is no window to center on yet —
@@ -126,7 +142,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ anchorView: AnchorView, context: Context) {
+    func updateNSView(_ anchorView: TabSwitcherPanelAnchorView, context: Context) {
         context.coordinator.update(
             anchorView: anchorView,
             content: content,
@@ -135,7 +151,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
         )
     }
 
-    static func dismantleNSView(_ nsView: AnchorView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: TabSwitcherPanelAnchorView, coordinator: Coordinator) {
         _ = nsView
         coordinator.dismiss()
     }
@@ -169,7 +185,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
 
         /// The `makeNSView` retry path: the anchor landed in a window after
         /// the last `update` found none.
-        func retryPresentation(anchorView: NSView) {
+        func retryPresentation(anchorView: TabSwitcherPanelAnchorView) {
             guard let content, let contentWidth, let window = anchorView.window else { return }
             present(content, contentWidth: contentWidth, centeredOn: window)
         }
@@ -282,7 +298,7 @@ private struct TabSwitcherPanelPresenter<Content: View>: NSViewRepresentable {
 
 /// Mount point that reports when it actually lands in a window (see
 /// `TabSwitcherPanelPresenter.makeNSView`).
-private final class AnchorView: NSView {
+private final class TabSwitcherPanelAnchorView: NSView {
     var onWindowAttached: (() -> Void)?
 
     override func viewDidMoveToWindow() {
@@ -300,19 +316,15 @@ private final class TabSwitcherPanel: NSPanel {
 
 // MARK: - Strip
 
-/// The cards themselves — the whole cycle order in one fixed row, sized by
-/// its content and centered on the window (Arc-style).
-///
-/// Not a viewport and not a scroll view: the panel's width is the content's
-/// width, full stop. The strip lives in its own borderless window (see
-/// `TabSwitcherPanelPresenter`), so a row wider than the terminal window
-/// extends past the window's edges instead of being clipped by them —
-/// clamped only by the screen. Sliding the row under a clip as the selection
-/// moved read as horizontal scrolling, and reflowing the card size changed
-/// the panel's width mid-gesture; symmetric overflow is the better failure.
+/// The cards themselves — an adaptive grid centered on the window (Arc-style).
+/// Every row shares one preview height, while each card's width follows the
+/// aspect ratio of its captured terminal composition. The panel is sized from
+/// the screen, not the terminal window, so it can overflow the window while
+/// keeping a comfortable row width.
 private struct TabSwitcherStrip: View {
     let entries: [TabSwitcherEntry]
     let selection: Int
+    let availableWidth: CGFloat
     /// Pointer handlers, both taking a card's index in the cycle order.
     let onHover: (Int) -> Void
     let onClick: (Int) -> Void
@@ -326,37 +338,103 @@ private struct TabSwitcherStrip: View {
     /// (left over from a uniform padding that was removed around it), which
     /// made the top gap 20 against 18 at the sides.
     private static let insets: CGFloat = 14
+    /// The panel may overflow the terminal window, but never intentionally the
+    /// screen. Five cards are the comfortable default; a smaller display gets
+    /// fewer columns rather than forcing a panel off-screen.
+    private static let preferredColumns = 5
+    private static let preferredCardWidth: CGFloat = 180
+    private static let screenMargin: CGFloat = 32
+    private static var visibleScreen: NSRect {
+        (NSApp.keyWindow ?? NSApp.mainWindow)?.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+    }
+
+    static var availableWidth: CGFloat {
+        let screenContentWidth = max(
+            TabSwitcherCard.minimumCardWidth,
+            visibleScreen.width - screenMargin * 2 - insets * 2
+        )
+        let preferredContentWidth = CGFloat(preferredColumns) * preferredCardWidth
+            + CGFloat(preferredColumns - 1) * spacing
+        return min(screenContentWidth, preferredContentWidth)
+    }
+
+    static var availableHeight: CGFloat {
+        max(1, visibleScreen.height - screenMargin * 2 - insets * 2)
+    }
+
+    private static func rows(
+        for entries: [TabSwitcherEntry],
+        availableWidth: CGFloat
+    ) -> [[TabSwitcherEntry]] {
+        let usableWidth = max(availableWidth, TabSwitcherCard.minimumCardWidth)
+        var rows: [[TabSwitcherEntry]] = []
+        var row: [TabSwitcherEntry] = []
+
+        for entry in entries {
+            let cardWidth = TabSwitcherCard.width(for: entry.previewAspect)
+            let proposedWidth = width(of: row) + (row.isEmpty ? 0 : spacing) + cardWidth
+            if !row.isEmpty, proposedWidth > usableWidth {
+                rows.append(row)
+                row = []
+            }
+            row.append(entry)
+        }
+        if !row.isEmpty { rows.append(row) }
+        return rows
+    }
+
+    private static func width(of row: [TabSwitcherEntry]) -> CGFloat {
+        row.reduce(CGFloat.zero) { width, entry in
+            width + TabSwitcherCard.width(for: entry.previewAspect)
+        } + CGFloat(max(0, row.count - 1)) * spacing
+    }
 
     /// The strip's exact width for `entryCount` cards — computed, because the
-    /// row is fully determined by its constants. The HEIGHT is not computed:
+    /// rows are determined by the available width and each card's aspect. The
+    /// HEIGHT is not computed:
     /// it is measured with a width proposal (`layoutSubtreeIfNeeded` then
     /// `fittingSize.height`, the `ArrowlessPopoverPresenter` pattern), which
     /// is the only reliable way through a hosting view — glass-backed content
     /// reports a near-zero intrinsic size when asked without one.
-    static func width(for entryCount: Int) -> CGFloat {
-        let cards = CGFloat(max(entryCount, 1))
-        return cards * TabSwitcherCard.cardWidth + (cards - 1) * spacing + insets * 2
+    static func width(for entries: [TabSwitcherEntry], availableWidth: CGFloat) -> CGFloat {
+        let layoutRows = Self.rows(for: entries, availableWidth: availableWidth)
+        let widestRow = layoutRows.map { width(of: $0) }.max() ?? TabSwitcherCard.minimumCardWidth
+        return widestRow + insets * 2
     }
 
     var body: some View {
-        HStack(spacing: Self.spacing) {
-            ForEach(entries, id: \.tab.id) { entry in
-                TabSwitcherCard(
-                    tab: entry.tab,
-                    number: entry.number,
-                    isSelected: entry.index == selection
-                )
-                .onHover { if $0 { onHover(entry.index) } }
-                .onTapGesture { onClick(entry.index) }
+        let rows = Self.rows(for: entries, availableWidth: availableWidth)
+        ScrollView(.vertical) {
+            VStack(spacing: Self.spacing) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: Self.spacing) {
+                        ForEach(row, id: \.tab.id) { entry in
+                            TabSwitcherCard(
+                                tab: entry.tab,
+                                number: entry.number,
+                                isSelected: entry.index == selection,
+                                previewAspect: entry.previewAspect,
+                                onActivate: { onClick(entry.index) }
+                            )
+                            .onHover { if $0 { onHover(entry.index) } }
+                            .onTapGesture { onClick(entry.index) }
+                        }
+                    }
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .scrollIndicators(.hidden)
+        // Unlimited candidates still need a reachable panel on a short
+        // display. Vertical scrolling is the overflow path; rows never scroll
+        // horizontally because their cards were packed against the width
+        // proposal above.
+        .frame(maxHeight: Self.availableHeight)
         .padding(Self.insets)
-        // Bare glass, no stroke: the glass draws its own adaptive edge, and
-        // the hairline border of `glassPanel` (the palette's recipe) stacked
-        // on it read, in this standalone panel, as a dark ring around the
-        // strip. The drop shadow is deliberately not here either — the window
-        // is exactly content-sized, so a SwiftUI shadow would clip at its
-        // bounds; the panel's WINDOW shadow provides the depth instead (see
+        // Bare glass, no custom stroke: the material draws its own adaptive
+        // edge. The panel's window shadow provides the depth (see
         // `makePanel`).
         .glassPanelBackground(cornerRadius: GlassPanelMetrics.cornerRadius)
     }
@@ -371,16 +449,18 @@ private struct TabSwitcherCard: View {
     /// The tab's 1-based number in the workspace, for the numbered tab icons.
     let number: Int
     let isSelected: Bool
+    let previewAspect: CGFloat
+    let onActivate: () -> Void
 
-    /// One card shape at every window and pane aspect: fixed width, with the
-    /// preview carrying a fixed 16:10 proportion (a screen-like shape — the
-    /// same one this strip assumed before it could be measured at all).
-    /// Nothing about the strip's geometry depends on the window, so the
-    /// panel's width never changes mid-gesture. `PaneMosaic` still lays its
-    /// leaves out by the split's real ratios; captured frames letterbox
-    /// `.fit` inside their leaves instead of dictating the card.
-    static let cardWidth: CGFloat = 160
-    private static let previewAspect: CGFloat = 16.0 / 10.0
+    /// Fallback aspect used only until a tab has a captured frame. Once a
+    /// frame exists, the card width follows its terminal composition.
+    static let defaultPreviewAspect: CGFloat = 16.0 / 10.0
+    /// The minimum width belongs to the whole card, not just the image. This
+    /// keeps the hover/click target and selected background coherent for tall
+    /// terminals whose natural width would otherwise become a tiny sliver.
+    static let minimumCardWidth: CGFloat = 150
+    private static let maximumCardWidth: CGFloat = 220
+    private static let previewHeight: CGFloat = 104
     /// Padding inside the card, around the preview and the title row. With the
     /// full-card selection fill (below) this is also the fill's inset from the
     /// card's rounded edge, so the selected card reads as one surface behind
@@ -389,26 +469,63 @@ private struct TabSwitcherCard: View {
     private static let previewCornerRadius: CGFloat = 8
     private static let cardCornerRadius: CGFloat = 10
 
-    /// The preview area: the card minus its padding, at the fixed aspect.
-    /// Exactly this wide, so the title row can ask for the same width and
-    /// nothing in the card is wider than its content — the #347
-    /// uniform-padding invariant.
-    private static var previewSize: CGSize {
-        let width = cardWidth - cardPadding * 2
-        return CGSize(width: width, height: width / previewAspect)
+    /// The preview width is driven by the terminal's aspect ratio while the
+    /// height stays shared by every card in a row. The outer minimum preserves
+    /// a useful hit target and keeps rows visually calm when one terminal is
+    /// unusually tall or narrow.
+    static func width(for aspect: CGFloat) -> CGFloat {
+        let contentMinimum = minimumCardWidth - cardPadding * 2
+        let contentMaximum = maximumCardWidth - cardPadding * 2
+        let naturalWidth = previewHeight * max(aspect, 0.1)
+        return min(max(naturalWidth, contentMinimum), contentMaximum) + cardPadding * 2
+    }
+
+    /// Compose the captured pane aspects through the split tree. Side-by-side
+    /// panes add width; stacked panes add height. This gives a split preview a
+    /// stable overall ratio without pretending every leaf is 16:10.
+    static func previewAspect(
+        for node: SplitNode,
+        previews: [UUID: PanePreview]
+    ) -> CGFloat {
+        let aspect: CGFloat
+        switch node {
+        case let .pane(pane):
+            if let size = previews[pane.id]?.image?.size, size.width > 0, size.height > 0 {
+                aspect = size.width / size.height
+            } else {
+                aspect = defaultPreviewAspect
+            }
+        case let .split(branch):
+            let first = previewAspect(for: branch.first, previews: previews)
+            let second = previewAspect(for: branch.second, previews: previews)
+            switch branch.direction {
+            case .horizontal:
+                aspect = first + second
+            case .vertical:
+                aspect = 1 / ((1 / first) + (1 / second))
+            }
+        }
+        return min(max(aspect, 0.65), 3.2)
+    }
+
+    private var previewSize: CGSize {
+        CGSize(
+            width: Self.width(for: previewAspect) - Self.cardPadding * 2,
+            height: Self.previewHeight
+        )
     }
 
     private var paneCount: Int { tab.splitRoot.allPanes().count }
 
     var body: some View {
-        // Preview, title row and card are all exactly `cardWidth`: the preview
-        // because the card's width is derived from it, the title row because
+        // Preview, title row and card share one derived width: the preview
+        // because the card's width follows its aspect, the title row because
         // it asks for the same. Nothing here is wider than its content, so
         // there is no surplus to center and the panel's padding reads the same
         // on every side at every window shape.
         VStack(alignment: .leading, spacing: 6) {
             PaneMosaic(node: tab.splitRoot, focusedPaneID: tab.focusedPaneID)
-                .frame(width: Self.previewSize.width, height: Self.previewSize.height)
+                .frame(width: previewSize.width, height: previewSize.height)
                 // The gaps between leaves are the miniature split dividers, so
                 // they need a color of their own. Left transparent they showed
                 // whatever sat behind the card — the selection fill on the
@@ -447,7 +564,7 @@ private struct TabSwitcherCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .frame(width: Self.previewSize.width, alignment: .leading)
+            .frame(width: previewSize.width, alignment: .leading)
         }
         .padding(Self.cardPadding)
         // The selection fills the WHOLE card — preview and title row together,
@@ -461,7 +578,9 @@ private struct TabSwitcherCard: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(.isButton)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityAction { onActivate() }
     }
 
     /// One spoken label for the whole card: number, title, execution state,
@@ -542,28 +661,36 @@ private struct PaneMosaicLeaf: View {
     let pane: Pane
     let isFocused: Bool
 
+    /// Leave a small, even breathing room around a captured frame so it never
+    /// touches an edge and reads as cropped.
+    private static let imageScale: CGFloat = 0.92
+
     @Environment(AppState.self)
     private var appState
 
     var body: some View {
         let preview = appState.panePreviews[pane.id]
-        // The pane's background is what defines this leaf's size. The preview
-        // goes in an `overlay`, never in the layout: a `resizable` image sized
-        // `.fill` reports its own (full-frame) dimensions, so as a ZStack child
-        // it grew the leaf past its frame and carried the name chip out of the
-        // clipped area with it — the chips were being drawn below the card.
+        // The pane's background defines this leaf's size. The preview stays in
+        // an overlay so its captured frame cannot change the split layout.
         Rectangle()
             .fill(Color(nsColor: preview?.background ?? MactermTheme.nsBg))
-            .overlay(alignment: .topLeading) {
+            .overlay {
                 if let image = preview?.image {
-                    // `.fit`, never `.fill`: the leaf's box already has this
-                    // pane's real proportions (the mosaic is laid out at the
-                    // pane region's aspect), so the frame lands in it whole.
-                    // Cropping here is what made an earlier cut of this show
-                    // only the top half of every tall pane.
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
+                    GeometryReader { geo in
+                        // `.fit`, never `.fill`: terminal content must not be
+                        // cropped. The explicit inner frame makes the image
+                        // smaller and centered rather than relying on the
+                        // overlay's implicit proposal.
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(
+                                width: geo.size.width * Self.imageScale,
+                                height: geo.size.height * Self.imageScale,
+                                alignment: .center
+                            )
+                            .frame(width: geo.size.width, height: geo.size.height)
+                    }
                 } else if let preview, !preview.lines.isEmpty {
                     PanePreviewText(lines: preview.lines, columns: preview.columns)
                 }

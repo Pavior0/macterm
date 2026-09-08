@@ -206,6 +206,30 @@ struct AppStateTests {
     }
 
     @Test
+    func recent_tab_switcher_unlimited_candidates_walk_the_full_recency_order() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        let priorCandidates = Preferences.shared.recentTabCandidates
+        defer {
+            Preferences.shared.showTabSwitcherOverlay = priorOverlay
+            Preferences.shared.recentTabCandidates = priorCandidates
+        }
+        Preferences.shared.showTabSwitcherOverlay = true
+        Preferences.shared.recentTabCandidates = 0
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let workspace = try #require(state.workspaces[project.id])
+        for _ in 0 ..< 5 {
+            state.createTab(projectID: project.id, projects: [project])
+        }
+        let expectedOrder = workspace.recencyOrder()
+
+        state.cycleRecentTab(projectID: project.id)
+
+        #expect(state.tabCycleTabIDs == expectedOrder)
+    }
+
+    @Test
     func recent_tab_direct_mode_walks_the_full_recency_order() throws {
         let priorOverlay = Preferences.shared.showTabSwitcherOverlay
         let priorCandidates = Preferences.shared.recentTabCandidates
@@ -479,6 +503,9 @@ struct AppStateTests {
         // Focus is how the user says "drive the size from here" — and any real
         // keystroke (which needs focus) makes zmx hand leadership over anyway.
         let state = makeAppState()
+        // A claim only counts once it reached the pty; there is no surface
+        // in a test, so stand in for a delivered write.
+        state.sendClaim = { _ in true }
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
         let source = try #require(tab.splitRoot.allPanes().first)
@@ -525,6 +552,7 @@ struct AppStateTests {
         // Once alone, a pane is the only client and so trivially the leader —
         // it must never stay dimmed after its twin goes away.
         let state = makeAppState()
+        state.sendClaim = { _ in true }
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
         let source = try #require(tab.splitRoot.allPanes().first)
@@ -554,9 +582,11 @@ struct AppStateTests {
     }
 
     @Test
-    func claiming_leadership_records_it_immediately() throws {
-        // The model updates now, not after the debounce, so the dim moves with
-        // the click. Only the wire message to zmx is deferred.
+    func claiming_leadership_records_it_only_when_the_claim_was_delivered() throws {
+        // The model follows the wire, synchronously: a delivered claim moves
+        // the dim with the click; an undeliverable one (a surface with no size
+        // yet) records nothing, or the next focus would read as a non-move and
+        // never send.
         let state = makeAppState()
         let p = seedProject(state)
         let tab = try #require(state.workspaces[p.id]?.activeTab)
@@ -565,10 +595,128 @@ struct AppStateTests {
         let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
         #expect(state.isLeader(source))
 
+        state.sendClaim = { _ in false }
         state.claimSessionLeadership(mirrored)
+        #expect(state.isLeader(source), "an undelivered claim must not move the model")
 
+        state.sendClaim = { _ in true }
+        state.claimSessionLeadership(mirrored)
         #expect(state.isLeader(mirrored))
         #expect(!state.isLeader(source))
+    }
+
+    @Test
+    func a_claim_is_sent_only_when_leadership_moves() throws {
+        // libghostty treats the claim's bytes as typing (selection cleared,
+        // viewport scrolled to the bottom), so a redundant claim on every
+        // focus report — mouseDown fires two per click — is a visible cost.
+        let state = makeAppState()
+        var sent: [UUID] = []
+        state.sendClaim = { sent.append($0.id)
+            return true
+        }
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        state.claimSessionLeadership(mirrored)
+        state.claimSessionLeadership(mirrored)
+        state.claimSessionLeadership(mirrored)
+        #expect(sent == [mirrorID], "repeated focus of the leader sends nothing more")
+
+        state.claimSessionLeadership(source)
+        #expect(sent == [mirrorID, source.id])
+    }
+
+    @Test
+    func focusing_a_remote_mirror_records_nothing() throws {
+        // Remote mirrors send no claim (the host's zmx may predate the tag),
+        // and must not RECORD one either: the pty is still sized for the other
+        // pane, so un-dimming the clicked one would lie. Typed input is the
+        // only thing that moves the host's leadership, and that is recorded
+        // from `noteUserInput`.
+        let state = makeAppState()
+        var sent: [UUID] = []
+        state.sendClaim = { sent.append($0.id)
+            return true
+        }
+        let p = seedProject(state, name: "box", path: "me@box:/srv")
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        #expect(source.isRemote)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        let mirrored = try #require(tab.splitRoot.findPane(id: mirrorID))
+
+        state.claimSessionLeadership(mirrored)
+        #expect(sent.isEmpty)
+        #expect(state.isLeader(source))
+
+        state.noteUserInput(in: mirrored)
+        #expect(state.isLeader(mirrored))
+    }
+
+    @Test
+    func closing_the_leader_hands_leadership_to_the_surviving_mirror() throws {
+        // zmx's closeClient only clears the leader; nobody is promoted, so the
+        // pty would keep the dead pane's size and drop the survivor's arrows
+        // and Ctrl keys until it typed something printable. The release path
+        // claims from the survivor.
+        let state = makeAppState()
+        var sent: [UUID] = []
+        state.sendClaim = { sent.append($0.id)
+            return true
+        }
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        // The source leads (it attached first); close it.
+        #expect(state.isLeader(source))
+        sent = []
+
+        state.closePane(source.id, projectID: p.id)
+
+        #expect(sent == [mirrorID], "the survivor is told to take the pty size")
+        let survivor = try #require(tab.splitRoot.findPane(id: mirrorID))
+        #expect(state.isLeader(survivor))
+    }
+
+    @Test
+    func closing_a_non_leader_mirror_hands_nothing_over() throws {
+        let state = makeAppState()
+        var sent: [UUID] = []
+        state.sendClaim = { sent.append($0.id)
+            return true
+        }
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let mirrorID = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+
+        state.closePane(mirrorID, projectID: p.id)
+
+        #expect(sent.isEmpty)
+        #expect(state.isLeader(source))
+    }
+
+    @Test
+    func nonLeaderPaneIDs_matches_isLeader_pane_by_pane() throws {
+        // The dim computation uses one traversal; it must agree with the
+        // per-pane answer it replaced.
+        let state = makeAppState()
+        state.sendClaim = { _ in true }
+        let p = seedProject(state)
+        let tab = try #require(state.workspaces[p.id]?.activeTab)
+        let source = try #require(tab.splitRoot.allPanes().first)
+        let a = try #require(state.mirrorPane(source.id, direction: .horizontal, projectID: p.id))
+        _ = try #require(state.mirrorPane(source.id, direction: .vertical, projectID: p.id))
+        state.focusPane(a, projectID: p.id)
+
+        let expected = Set(tab.splitRoot.allPanes().filter { !state.isLeader($0) }.map(\.id))
+        #expect(state.nonLeaderPaneIDs(in: tab) == expected)
+        #expect(expected.count == 2)
     }
 
     @Test
@@ -1467,6 +1615,11 @@ struct AppStateTests {
     func renameTabContaining_unknown_pane_is_noop() {
         let state = makeAppState()
         let p = seedProject(state)
+        // Sidebar visibility is per window (#345); the app-wide property is a
+        // mirror of the key window's, so there has to be one to hold it.
+        let window = WindowState(activeProjectID: p.id)
+        state.registerWindow(window)
+        state.noteKeyWindow(window)
         state.sidebarVisible = false
         state.renameTab(containing: UUID(), projectID: p.id)
         #expect(!state.sidebarVisible)

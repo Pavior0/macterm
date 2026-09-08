@@ -323,8 +323,9 @@ final class Preferences {
     /// Recent Tab shortcut is held. Default 5 — the full recency order
     /// upstream walks outgrows any window on a busy project and pushes the
     /// interesting targets off the strip. Direct cycling (switcher off) is
-    /// unaffected and keeps the full order. Clamped to 2…12 on read, so a
-    /// hand-edited or stale value can't empty or flood the strip.
+    /// unaffected and keeps the full order. `0` means unlimited; numeric
+    /// values are clamped to 2…12 on read so stale data cannot empty or flood
+    /// the strip.
     var recentTabCandidates: Int {
         didSet { defaults.set(recentTabCandidates, forKey: Keys.recentTabCandidates) }
     }
@@ -358,6 +359,11 @@ final class Preferences {
 
     var showNewProjectButton: Bool {
         didSet { defaults.set(showNewProjectButton, forKey: Keys.showNewProjectButton) }
+    }
+
+    /// Show a New Tab button while the pointer rests on a project row.
+    var showProjectNewTabButton: Bool {
+        didSet { defaults.set(showProjectNewTabButton, forKey: Keys.showProjectNewTabButton) }
     }
 
     /// Allow non-interactive background ssh connections to remote-project
@@ -437,7 +443,7 @@ final class Preferences {
     /// `MainWindow`'s `navigationSplitViewColumnWidth` so a stored value can
     /// never fall outside what the column accepts.
     static let sidebarWidthRange: ClosedRange<Double> = 140 ... 400
-    static let defaultSidebarWidth: Double = 180
+    static let defaultSidebarWidth: Double = 220
 
     /// Which appcast channel auto-updates come from. Read by `Updater`'s
     /// `allowedChannels(for:)`, so `.beta`/`.tip` make the matching prerelease
@@ -851,6 +857,7 @@ final class Preferences {
         autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
         autoAssignProjectColors = defaults.object(forKey: Keys.autoAssignProjectColors) as? Bool ?? false
         showNewProjectButton = defaults.object(forKey: Keys.showNewProjectButton) as? Bool ?? true
+        showProjectNewTabButton = defaults.object(forKey: Keys.showProjectNewTabButton) as? Bool ?? true
         backgroundSSHConnections = defaults.object(forKey: Keys.backgroundSSHConnections) as? Bool ?? true
         reconnectRemotePanes = defaults.object(forKey: Keys.reconnectRemotePanes) as? Bool ?? true
         peekSidebarWhenHidden = defaults.object(forKey: Keys.peekSidebarWhenHidden) as? Bool ?? true
@@ -887,9 +894,10 @@ final class Preferences {
 
     /// Default and bounds for `recentTabCandidates`. The lower bound is 2 —
     /// one candidate is nothing to switch to — and the upper bound keeps the
-    /// strip inside any window at the card metrics `TabSwitcherCard` ships.
+    /// finite choice list manageable. Zero is the explicit unlimited choice.
     private static func clampRecentTabCandidates(_ v: Int?) -> Int {
         guard let v else { return 5 }
+        if v == 0 { return 0 }
         return min(max(v, 2), 12)
     }
 
@@ -992,6 +1000,7 @@ final class Preferences {
         static let autoNameTabs = "macterm.tabs.autoName"
         static let autoAssignProjectColors = "macterm.projects.autoAssignColors"
         static let showNewProjectButton = "macterm.sidebar.showNewProjectButton"
+        static let showProjectNewTabButton = "macterm.sidebar.showProjectNewTabButton"
         static let backgroundSSHConnections = "macterm.remote.backgroundSSHConnections"
         static let reconnectRemotePanes = "macterm.remote.reconnectDroppedPanes"
         static let installationID = "macterm.installationID"

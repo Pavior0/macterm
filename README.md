@@ -1,11 +1,11 @@
 <h1 align="center">
-  <img src="./assets/icon.png" width="128" />
+  <img src="./assets/icons/icon.png" width="128" />
   <br />
   Macterm
 </h1>
 
 <p align="center">
-  A macOS terminal with session persistence, smart multiplexing, and native UI. Built on libghostty.
+  A lightweight macOS terminal with vertical tabs, session persistence, and native UI. Built on libghostty
 
 </p>
 
