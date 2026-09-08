@@ -52,10 +52,10 @@ struct CommandPalettePanel: View {
     private var selectedIndex = 0
     @State
     private var sections: [PaletteSection] = []
-    /// Set when the last `selectedIndex` change came from mouse hover, so the
-    /// auto-scroll-to-center (keyboard nav) can skip it.
+    /// Knows which `selectedIndex` changes came from mouse hover, so the
+    /// auto-scroll-to-center (keyboard nav) can skip them.
     @State
-    private var selectionFromHover = false
+    private var hoverTracker = HoverSelectionTracker()
     /// Each row's vertical extent in the `rowSpace` coordinate space (relative
     /// to the scroll viewport), keyed by flat index. Drives hover-to-select and
     /// edge-only keyboard scrolling.
@@ -184,20 +184,17 @@ struct CommandPalettePanel: View {
                 .onContinuousHover(coordinateSpace: .named(rowSpace)) { phase in
                     guard case let .active(point) = phase,
                           let idx = rowFrames.first(where: { $0.value.contains(point.y) })?.key,
-                          selectedIndex != idx
+                          // Mouse drives selection; the tracker lets the
+                          // keyboard-nav auto-scroll below skip this change so
+                          // the list doesn't move under the cursor.
+                          hoverTracker.noteHover(over: idx, current: selectedIndex)
                     else { return }
-                    // Mouse drives selection; suppress the keyboard-nav auto-scroll
-                    // below so the list doesn't move under the cursor.
-                    selectionFromHover = true
                     selectedIndex = idx
                 }
                 .onChange(of: selectedIndex) { _, idx in
                     // Only follow keyboard navigation; hovering shouldn't scroll.
-                    if selectionFromHover {
-                        selectionFromHover = false
-                    } else {
-                        scrollSelectionIntoView(idx, proxy: proxy)
-                    }
+                    guard !hoverTracker.isHoverSelection(idx) else { return }
+                    scrollSelectionIntoView(idx, proxy: proxy)
                 }
             }
         }

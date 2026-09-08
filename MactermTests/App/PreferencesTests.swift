@@ -10,16 +10,21 @@ import Testing
 /// developer's live app state.
 @MainActor
 struct PreferencesTests {
+    /// Unlimited by default, so introducing the limit changes nothing about
+    /// how far Recent Tab reaches on an existing install.
     @Test
-    func recent_tab_candidates_default_to_five_and_round_trip() {
+    func recent_tab_candidates_default_to_unlimited_and_round_trip() {
         let prior = Preferences.shared.recentTabCandidates
         defer { Preferences.shared.recentTabCandidates = prior }
 
-        #expect(Preferences.shared.recentTabCandidates == 5)
+        #expect(Preferences.shared.recentTabCandidates == Preferences.unlimitedRecentTabCandidates)
         Preferences.shared.recentTabCandidates = 8
-        #expect(Preferences.defaults.integer(forKey: Preferences.Keys.recentTabCandidates) == 8)
-        Preferences.shared.recentTabCandidates = 0
-        #expect(Preferences.defaults.integer(forKey: Preferences.Keys.recentTabCandidates) == 0)
+        #expect(Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates) as? Int == 8)
+        Preferences.shared.recentTabCandidates = Preferences.unlimitedRecentTabCandidates
+        #expect(
+            Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates) as? Int
+                == Preferences.unlimitedRecentTabCandidates
+        )
     }
 
     @Test

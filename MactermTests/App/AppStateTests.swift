@@ -2513,8 +2513,11 @@ struct AppStateTests {
 
     // MARK: - Tab switcher candidates and live previews
 
+    /// The limit bounds the cycle the keyboard walks, and it does so whether
+    /// or not the switcher is showing — a tab's reachability must not depend
+    /// on a display preference.
     @Test
-    func recent_tab_candidate_limit_applies_only_to_finite_overlay_settings() throws {
+    func recent_tab_candidate_limit_bounds_the_cycle_regardless_of_overlay() throws {
         let priorOverlay = Preferences.shared.showTabSwitcherOverlay
         let priorCandidates = Preferences.shared.recentTabCandidates
         defer {
@@ -2523,8 +2526,9 @@ struct AppStateTests {
         }
         let cases = [
             (showsOverlay: true, limit: 3, expectedCount: 3),
-            (showsOverlay: true, limit: 0, expectedCount: 6),
-            (showsOverlay: false, limit: 2, expectedCount: 6),
+            (showsOverlay: true, limit: Preferences.unlimitedRecentTabCandidates, expectedCount: 6),
+            (showsOverlay: false, limit: 2, expectedCount: 2),
+            (showsOverlay: false, limit: Preferences.unlimitedRecentTabCandidates, expectedCount: 6),
         ]
 
         for testCase in cases {

@@ -301,9 +301,15 @@ final class Preferences {
 
     /// Finite candidate counts offered in Settings and accepted from storage.
     static let recentTabCandidateRange = 2 ... 12
+    /// The stored value meaning "every tab". Also the default, so an upgrade
+    /// changes nothing about how far the Recent Tab shortcut reaches.
+    static let unlimitedRecentTabCandidates = 0
 
-    /// Maximum recent tabs shown in the switcher. `0` means unlimited;
-    /// direct cycling without the switcher always uses the full recency order.
+    /// How many of the most recent tabs the Recent Tab shortcut cycles
+    /// through, with or without the switcher showing —
+    /// `unlimitedRecentTabCandidates` for every tab. A tab past the limit is
+    /// unreachable by the gesture, so this bounds the cycle itself, not just
+    /// the cards the switcher draws; the two are always the same list.
     var recentTabCandidates: Int {
         didSet { defaults.set(recentTabCandidates, forKey: Keys.recentTabCandidates) }
     }
@@ -868,10 +874,9 @@ final class Preferences {
         return min(max(v, sidebarWidthRange.lowerBound), sidebarWidthRange.upperBound)
     }
 
-    /// One candidate cannot switch tabs; zero is the explicit unlimited value.
+    /// One candidate cannot switch tabs, so a stored `1` reads as the floor.
     private static func clampRecentTabCandidates(_ v: Int?) -> Int {
-        guard let v else { return 5 }
-        if v == 0 { return 0 }
+        guard let v, v != unlimitedRecentTabCandidates else { return unlimitedRecentTabCandidates }
         return min(max(v, recentTabCandidateRange.lowerBound), recentTabCandidateRange.upperBound)
     }
 
