@@ -229,6 +229,11 @@ extension AppCommand {
         case .saveLayout:
             guard let current else { return nil }
             return { ctx.appState.saveLayoutPresentingError(current, siblingProjects: ctx.projectStore.projects) }
+        case .toggleProjectSwitcher:
+            guard Preferences.shared.workspaceTabLayout == .horizontal else { return nil }
+            return {
+                ctx.appState.isHorizontalProjectSwitcherPresented.toggle()
+            }
         case .nextProject:
             return { ctx.appState.selectNextProject(projects: ctx.projectStore.projects) }
         case .previousProject:

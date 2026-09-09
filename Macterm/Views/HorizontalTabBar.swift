@@ -7,8 +7,8 @@ struct HorizontalTabBar: View {
     private var appState
     @Environment(ProjectStore.self)
     private var projectStore
-    @State
-    private var isProjectSwitcherPresented = false
+    @Environment(WindowState.self)
+    private var windowState
     @State
     private var isProjectSwitcherHovering = false
     @State
@@ -26,9 +26,10 @@ struct HorizontalTabBar: View {
     }
 
     var body: some View {
+        @Bindable var windowState = windowState
         HStack(spacing: 8) {
             Button {
-                isProjectSwitcherPresented.toggle()
+                windowState.isHorizontalProjectSwitcherPresented.toggle()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: activeProject?.isRemote == true ? "network" : "folder")
@@ -44,7 +45,7 @@ struct HorizontalTabBar: View {
                 .frame(height: 28)
                 .horizontalNavigationStateSurface(
                     isHovering: isProjectSwitcherHovering,
-                    isSelected: isProjectSwitcherPresented,
+                    isSelected: windowState.isHorizontalProjectSwitcherPresented,
                     cornerRadius: 7
                 )
                 .contentShape(Rectangle())
@@ -56,11 +57,11 @@ struct HorizontalTabBar: View {
             .help("Switch project")
             .background {
                 ArrowlessPopoverPresenter(
-                    isPresented: $isProjectSwitcherPresented,
+                    isPresented: $windowState.isHorizontalProjectSwitcherPresented,
                     preferredWidth: 320,
                     acceptsKeyboardInput: true,
                     content: AnyView(
-                        HorizontalProjectSwitcher(isPresented: $isProjectSwitcherPresented)
+                        HorizontalProjectSwitcher(isPresented: $windowState.isHorizontalProjectSwitcherPresented)
                             .environment(appState)
                             .environment(projectStore)
                     )
@@ -105,6 +106,7 @@ struct HorizontalTabBarAccessory: NSViewRepresentable {
     private var appState
     @Environment(ProjectStore.self)
     private var projectStore
+    let windowState: WindowState
     let isPresented: Bool
     let availableWidth: CGFloat
 
@@ -130,6 +132,7 @@ struct HorizontalTabBarAccessory: NSViewRepresentable {
                 .frame(maxHeight: .infinity, alignment: .center)
                 .environment(appState)
                 .environment(projectStore)
+                .environment(windowState)
         )
         context.coordinator.scheduleSync(
             marker: marker,

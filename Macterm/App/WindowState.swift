@@ -73,6 +73,8 @@ final class WindowState: Identifiable {
     /// commands, the CLI) that mean "the window the user is in".
     var sidebarVisible = true
     var isCommandPaletteVisible = false
+    /// Whether this window's horizontal-tab project switcher is open.
+    var isHorizontalProjectSwitcherPresented = false
     var isNewRemoteProjectSheetPresented = false
 
     init(activeProjectID: UUID? = nil, sidebarWidth: Double? = nil) {

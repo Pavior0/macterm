@@ -238,6 +238,7 @@ struct MainWindow: View {
         .toolbar(chromeHidden ? .hidden : .visible, for: .windowToolbar)
         .modifier(WorkspaceTabToolbarModifier(layout: tabLayout))
         .background(HorizontalTabBarAccessory(
+            windowState: windowState,
             isPresented: tabLayout == .horizontal,
             availableWidth: detailWidth
         ))

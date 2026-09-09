@@ -322,6 +322,14 @@ struct HotkeysTests {
     }
 
     @Test
+    func project_switcher_has_rebindable_default() {
+        #expect(HotkeyAction.toggleProjectSwitcher.defaultShortcut == "cmd+shift+p")
+        #expect(HotkeyAction.toggleProjectSwitcher.title == "Project Switcher")
+        #expect(AppCommand.toggleProjectSwitcher.hotkeyAction == .toggleProjectSwitcher)
+        #expect(AppCommand.toggleProjectSwitcher.category == .projects)
+    }
+
+    @Test
     func layout_actions_are_unbound_by_default_and_titled_from_command() {
         // Both ship unbound: applying or saving a layout rewrites the live pane
         // tree, so a stock binding would make a mistyped chord destructive.

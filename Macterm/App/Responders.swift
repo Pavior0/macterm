@@ -147,6 +147,16 @@ final class MainAppResponder: KeyResponder {
         // into the palette would fire Cmd+T's New Tab action.
         if appState.isCommandPaletteVisible { return .passThrough }
 
+        // This command must run before the key-window gate below: while the
+        // switcher is open its arrowless panel is the key window, and pressing
+        // the configured chord again should still close it.
+        if HotkeyRegistry.matches(event, action: .toggleProjectSwitcher) {
+            let ctx = AppCommandContext(appState: appState, projectStore: projectStore)
+            guard let run = AppCommand.toggleProjectSwitcher.action(in: ctx) else { return .passThrough }
+            run()
+            return .handled
+        }
+
         // Everything below acts on the main terminal window's workspace.
         // When a different window is key — Settings, an alert sheet — none of
         // it may fire: Cmd+W would close a terminal tab behind the window the

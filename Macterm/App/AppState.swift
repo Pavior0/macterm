@@ -751,6 +751,12 @@ final class AppState {
         set { keyOrFirstWindow?.isCommandPaletteVisible = newValue }
     }
 
+    /// Presents the searchable project switcher owned by the horizontal tab bar.
+    var isHorizontalProjectSwitcherPresented: Bool {
+        get { keyOrFirstWindow?.isHorizontalProjectSwitcherPresented ?? false }
+        set { keyOrFirstWindow?.isHorizontalProjectSwitcherPresented = newValue }
+    }
+
     /// Presents the "New Remote Project" sheet (#104) — set by the palette
     /// command, the sidebar's New Project menu and Settings → Projects,
     /// consumed by `MainWindow`.
