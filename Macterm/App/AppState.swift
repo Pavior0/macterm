@@ -147,9 +147,7 @@ final class AppState {
         first.activeProjectID = saved[0].activeProjectID ?? first.activeProjectID
         if let width = saved[0].sidebarWidth { first.sidebarWidth = width }
         if let visible = saved[0].sidebarVisible { first.sidebarVisible = visible }
-        if let project = first.activeProjectID, let tab = saved[0].activeTabID {
-            first.activeTabIDs[project] = tab
-        }
+        recordRestoredTab(saved[0].activeTabID, in: first)
         if keyWindowID == first.id {
             activeProjectID = first.activeProjectID
             alignKeyWindowTab()
@@ -310,6 +308,15 @@ final class AppState {
         noteKeyWindow(showing)
     }
 
+    /// Seed a restored window's tab record from its snapshot entry. The pinned
+    /// workspace is skipped: its selection is the workspace's own (restored
+    /// via `pinnedActiveTabID`), and a per-window entry for it is read by
+    /// nothing and maintained by nothing — see `selectedTab(for:in:)`.
+    private func recordRestoredTab(_ tabID: UUID?, in window: WindowState) {
+        guard let project = window.activeProjectID, project != PinnedTabs.projectID, let tabID else { return }
+        window.activeTabIDs[project] = tabID
+    }
+
     func registerWindow(_ window: WindowState) {
         guard !windows.contains(where: { $0.id == window.id }) else { return }
         if !pendingWindowRestores.isEmpty {
@@ -319,7 +326,7 @@ final class AppState {
             let restoring = pendingWindowRestores.removeFirst()
             if let project = restoring.activeProjectID {
                 window.activeProjectID = project
-                if let tab = restoring.activeTabID { window.activeTabIDs[project] = tab }
+                recordRestoredTab(restoring.activeTabID, in: window)
             }
             if let width = restoring.sidebarWidth { window.sidebarWidth = width }
             if let visible = restoring.sidebarVisible { window.sidebarVisible = visible }
@@ -424,9 +431,22 @@ final class AppState {
     /// that tab still exists, else the workspace's active tab. Two windows may
     /// select the same tab — `viewTab(for:in:)` decides which one renders the
     /// real panes and which a mirror of them.
+    ///
+    /// The pinned workspace has no per-window selection: every window on it
+    /// shows its active tab. Nothing maintains a map entry for it — the
+    /// workspace hook, `reconcileWindowViews` and `alignKeyWindowTab` all skip
+    /// the sentinel, and `selectTab(_:projectID:in:)` routes it through the
+    /// workspace — so a record there could only ever be stale. One was: the
+    /// restore paths seeded it from the snapshot, and this then rendered that
+    /// tab no matter which pinned tab was active, so Cmd+T on a pinned tab
+    /// created a tab the sidebar selected while the window kept showing the
+    /// old one.
     func selectedTab(for projectID: UUID, in window: WindowState) -> TerminalTab? {
         guard let ws = workspaces[projectID] else { return nil }
-        if let id = window.activeTabIDs[projectID], let tab = ws.tabs.first(where: { $0.id == id }) {
+        if projectID != PinnedTabs.projectID,
+           let id = window.activeTabIDs[projectID],
+           let tab = ws.tabs.first(where: { $0.id == id })
+        {
             return tab
         }
         return ws.activeTab
@@ -978,23 +998,39 @@ final class AppState {
     var tabCycleTabIDs: [UUID] { tabCycleOrder }
     var tabCycleSelection: Int { tabCycleIndex }
 
-    /// Last collected preview per pane, keyed by pane ID — what the tab
+    /// Last sampled preview per pane, keyed by pane ID — what the tab
     /// switcher renders.
     ///
-    /// A cache rather than a capture at gesture time, because a pane only
-    /// holds a rendered frame while it is on screen (see `PanePreview`): by
-    /// the time the switcher wants to show you the tabs you are *not* on,
-    /// their pixels are gone. So the foreground poll collects a frame from
-    /// whatever is visible and this remembers it, and the strip shows each
-    /// tab as it last looked. Panes no frame was ever collected from fall
-    /// back to their live viewport text.
+    /// Filled only while a cycle is showing the switcher: `beginLivePreviews`
+    /// wakes the renderer of every offered pane (an off-screen renderer is
+    /// parked and holds no frame, see `PanePreview`) and re-samples them all
+    /// on a timer until the cycle commits, so a card pictures its tab as it
+    /// is now. The entries outlive the gesture on purpose — the next one opens
+    /// on each tab's last frame for the tick or two the woken renderers need,
+    /// instead of on a bare fill — and `store` never lets a frameless sample
+    /// erase a frame, so a card can only ever go from nothing to a picture.
     private(set) var panePreviews: [UUID: PanePreview] = [:]
 
-    /// Throttle for the poll-driven collection above. The poll itself runs as
-    /// fast as 250ms in a burst; a thumbnail does not need that.
+    /// Aspect ratio of the region a workspace's panes fill on screen, so the
+    /// switcher's cards can be shaped like the thing they picture rather than
+    /// cropping it. Measured from whichever tab is visible; every tab in the
+    /// workspace fills the same container, so one value shapes the strip.
+    private(set) var paneContainerAspect: CGFloat?
+
+    /// The panes whose renderers a cycle in flight is keeping awake
+    /// (`GhosttyTerminalNSView.rendersForPreview`), and the timer re-sampling
+    /// them. Remembered as panes, not looked up from the cycle order: a tab
+    /// that closes mid-gesture must still get its override cleared. Both are
+    /// empty whenever no cycle is showing the switcher.
     @ObservationIgnored
-    private var lastPanePreviewCapture = Date.distantPast
-    private static let panePreviewInterval: TimeInterval = 0.75
+    private var livePreviewPanes: [Pane] = []
+    @ObservationIgnored
+    private var livePreviewTimer: Timer?
+    /// Sampling cadence while the switcher is up. Fast enough to read as the
+    /// terminal moving; the copy per pane is a downsample of one frame.
+    static let livePreviewInterval: TimeInterval = 0.2
+    /// Whether a cycle is currently re-sampling its cards.
+    var isLivePreviewing: Bool { livePreviewTimer != nil }
 
     private let workspaceStore: WorkspaceStore
 
@@ -1284,7 +1320,6 @@ final class AppState {
     /// workspaces. Each pane only republishes (and triggers a tab re-render)
     /// when its name actually changes, so this is cheap when nothing's moving.
     func refreshAllForegroundProcesses() {
-        capturePanePreviewsIfDue()
         // Shell/raw-mode detection (KERN_PROCARGS2 + open/tcgetattr per pane)
         // and the quiet-settle only matter when the status indicator is shown;
         // skip them in icon mode so the default poll stays as cheap as before
@@ -2657,20 +2692,15 @@ final class AppState {
     func cycleRecentTab(projectID: UUID) {
         guard let ws = workspaces[projectID] else { return }
         if tabCycleOrder.isEmpty {
-            // The switcher offers the N most recently used tabs — a
-            // preference, default 5. Upstream walked the FULL recency order,
-            // which outgrows any window on a busy project and pushes the
-            // interesting targets off the strip. Direct mode (no overlay)
-            // keeps the full order: plain cycling has no strip to fit and no
-            // reason to stop early.
+            // The limit bounds the cycle whether or not the switcher shows it:
+            // the cards and the keyboard walk one list, so a limit that only
+            // applied with the overlay on would make a tab's reachability
+            // depend on a display preference.
             let recency = ws.recencyOrder()
-            if Preferences.shared.showTabSwitcherOverlay,
-               Preferences.shared.recentTabCandidates > 0
-            {
-                tabCycleOrder = Array(recency.prefix(Preferences.shared.recentTabCandidates))
-            } else {
-                tabCycleOrder = recency
-            }
+            let candidateLimit = Preferences.shared.recentTabCandidates
+            tabCycleOrder = candidateLimit == Preferences.unlimitedRecentTabCandidates
+                ? recency
+                : Array(recency.prefix(candidateLimit))
             tabCycleIndex = 0
             tabCycleProjectID = projectID
             tabCycleOriginalTabID = ws.activeTabID
@@ -2696,63 +2726,75 @@ final class AppState {
         ws.peekTab(tabCycleOrder[tabCycleIndex])
     }
 
-    /// Bring the preview cache up to date for the workspace a cycle is about
-    /// to walk: refresh the visible tab (its frame is live right now) and give
-    /// every other pane a text fallback if nothing was ever collected from it.
-    /// Skipped entirely when the overlay is off, so the default cycling path
-    /// costs nothing.
+    /// Ready the cards for the workspace a cycle is about to walk: shape them
+    /// from the visible tab (the only one with a measurable on-screen region),
+    /// forget panes that have closed, and start sampling. Skipped entirely
+    /// when the overlay is off, so the default cycling path costs nothing.
     private func prepareTabCyclePreviews(in ws: Workspace) {
         guard Preferences.shared.showTabSwitcherOverlay else { return }
-        for tab in ws.tabs {
-            let isVisible = tab.id == ws.activeTabID
-            // Re-capture a pane we know nothing about yet, not merely one with
-            // no entry at all. A capture can legitimately come back empty —
-            // the pane has no NSView until `SurfaceIncubator` warms it, no
-            // ghostty surface until that view gets a window and a size, and no
-            // text until its shell prints — and treating the first such answer
-            // as the answer left the card blank for the rest of the run, since
-            // an entry existed and nothing would replace it.
-            for pane in tab.splitRoot.allPanes()
-                where isVisible || panePreviews[pane.id]?.isEmpty ?? true
-            {
-                store(PanePreviewCapture.capture(pane), for: pane.id)
-            }
+        if let tab = ws.activeTab, let aspect = PanePreviewCapture.containerAspect(of: tab) {
+            paneContainerAspect = aspect
         }
         // Drop previews of panes that have closed. Checked across every
         // workspace, not just this one — a cached preview belongs to a pane,
         // and a pane in another project is still alive.
         let live = Set(workspaces.values.flatMap { $0.tabs.flatMap { $0.splitRoot.allPanes().map(\.id) } })
         panePreviews = panePreviews.filter { live.contains($0.key) }
+        beginLivePreviews(in: ws)
     }
 
-    /// Collect a frame from whatever is on screen, throttled. Called from the
-    /// foreground poll — the one place that already runs whenever a terminal
-    /// is visible and doing something.
-    private func capturePanePreviewsIfDue() {
-        guard Preferences.shared.showTabSwitcherOverlay,
-              let projectID = activeProjectID,
-              let tab = workspaces[projectID]?.activeTab
-        else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastPanePreviewCapture) >= Self.panePreviewInterval else { return }
-        lastPanePreviewCapture = now
-        for pane in tab.splitRoot.allPanes() {
-            store(PanePreviewCapture.capture(pane), for: pane.id)
+    /// Keep the cards current for as long as the gesture lasts: wake the
+    /// renderer of every pane the cycle offers and sample them all, now and
+    /// then on a timer. An off-screen pane's renderer is parked
+    /// (`syncOcclusion`) and holds no frame, so without the wake-up there
+    /// would be nothing to sample; waking it makes libghostty rebuild and draw
+    /// at once, and the pty has kept the screen current all along. Every pane
+    /// is woken, the visible tab's included — it is on screen anyway, and one
+    /// rule beats tracking which tab that is. The immediate sample is for the
+    /// visible tab, whose frame exists right now; the woken renderers draw
+    /// asynchronously and are picked up by the first tick, under the overlay's
+    /// fade-in. Undone by `endLivePreviews`.
+    private func beginLivePreviews(in ws: Workspace) {
+        endLivePreviews()
+        let cycleTabs = tabCycleOrder.compactMap { id in ws.tabs.first { $0.id == id } }
+        livePreviewPanes = cycleTabs.flatMap { $0.splitRoot.allPanes() }
+        for pane in livePreviewPanes {
+            pane.nsView?.rendersForPreview = true
+        }
+        captureLivePreviews()
+        let timer = Timer(timeInterval: Self.livePreviewInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.captureLivePreviews() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        livePreviewTimer = timer
+    }
+
+    /// One sampling tick. Each pane's last preview is handed back in so a
+    /// pane whose renderer drew nothing since is returned as is — the copy
+    /// is the cost here, and only the panes that are actually moving pay it.
+    private func captureLivePreviews() {
+        for pane in livePreviewPanes {
+            store(PanePreviewCapture.capture(pane, reusing: panePreviews[pane.id]), for: pane.id)
         }
     }
 
-    /// Keep the best preview we have. A capture that came back frameless must
-    /// not erase a frame we already collected — that is the whole point of the
-    /// cache — and one that came back with nothing at all must not erase text
-    /// either, so a pane that goes quiet keeps showing what it last looked
-    /// like rather than blanking.
+    /// Park the renderers `beginLivePreviews` woke and stop sampling. Runs on
+    /// every way a cycle ends, so a renderer can never be left awake behind a
+    /// tab nobody is looking at.
+    private func endLivePreviews() {
+        livePreviewTimer?.invalidate()
+        livePreviewTimer = nil
+        for pane in livePreviewPanes {
+            pane.nsView?.rendersForPreview = false
+        }
+        livePreviewPanes = []
+    }
+
+    /// Keep the best preview we have: a sample that came back frameless must
+    /// not erase a frame already collected, so a pane whose woken renderer has
+    /// not drawn yet keeps showing its last picture rather than blanking.
     private func store(_ preview: PanePreview, for paneID: UUID) {
-        guard let existing = panePreviews[paneID] else {
-            panePreviews[paneID] = preview
-            return
-        }
-        if preview.image == nil, existing.image != nil { return }
-        if preview.isEmpty, !existing.isEmpty { return }
+        if preview.image == nil, panePreviews[paneID]?.image != nil { return }
         panePreviews[paneID] = preview
     }
 
@@ -2773,6 +2815,7 @@ final class AppState {
     }
 
     func commitTabCycle(projectID: UUID) {
+        endLivePreviews()
         guard !tabCycleOrder.isEmpty, let ws = workspaces[projectID] else {
             resetTabCycle()
             return

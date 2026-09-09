@@ -1256,16 +1256,16 @@ private struct AppearanceSettings: View {
                 )
                 .settingsCaption()
 
-                Picker("Recent tab count", selection: $recentTabCandidates) {
-                    ForEach(2 ... 12, id: \.self) { count in
+                Picker("Recent tabs to cycle through", selection: $recentTabCandidates) {
+                    ForEach(Preferences.recentTabCandidateRange, id: \.self) { count in
                         Text("\(count)").tag(count)
                     }
-                    Text("Unlimited").tag(0)
+                    Text("Unlimited").tag(Preferences.unlimitedRecentTabCandidates)
                 }
                 .onChange(of: recentTabCandidates) { _, v in
                     Preferences.shared.recentTabCandidates = v
                 }
-                Text("Number of recent tabs shown in the switcher. Unlimited shows every tab.")
+                Text("How many of the most recent tabs the Recent Tab shortcut reaches, with or without previews.")
                     .settingsCaption()
             }
 

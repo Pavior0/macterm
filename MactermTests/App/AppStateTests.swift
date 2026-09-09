@@ -230,35 +230,6 @@ struct AppStateTests {
     }
 
     @Test
-    func recent_tab_direct_mode_walks_the_full_recency_order() throws {
-        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
-        let priorCandidates = Preferences.shared.recentTabCandidates
-        defer {
-            Preferences.shared.showTabSwitcherOverlay = priorOverlay
-            Preferences.shared.recentTabCandidates = priorCandidates
-        }
-        Preferences.shared.showTabSwitcherOverlay = false
-        Preferences.shared.recentTabCandidates = 2
-
-        let state = makeAppState()
-        let project = seedProject(state)
-        let workspace = try #require(state.workspaces[project.id])
-        for _ in 0 ..< 4 {
-            state.createTab(projectID: project.id, projects: [project])
-        }
-
-        // Sampled BEFORE the cycle: direct mode peeks a tab for real on the
-        // first press, which reorders what `recencyOrder()` reports (the
-        // active tab is always first).
-        let expectedOrder = workspace.recencyOrder()
-        state.cycleRecentTab(projectID: project.id)
-
-        // The candidate cap only bounds the strip; plain cycling has no strip
-        // to fit and keeps the full order.
-        #expect(state.tabCycleTabIDs == expectedOrder)
-    }
-
-    @Test
     func recent_tab_escape_cancels_a_direct_cycle_and_restores_the_original_tab() throws {
         let priorOverlay = Preferences.shared.showTabSwitcherOverlay
         let priorShortcut = HotkeyRegistry.selectedShortcutString(for: .recentTab)
@@ -2793,6 +2764,106 @@ struct AppStateTests {
         state.confirmPendingCloseTab()
         #expect(state.pendingCloseTab == nil)
         #expect(ws.tabs.count == 1)
+    }
+
+    // MARK: - Tab switcher candidates and live previews
+
+    /// The limit bounds the cycle the keyboard walks, and it does so whether
+    /// or not the switcher is showing — a tab's reachability must not depend
+    /// on a display preference.
+    @Test
+    func recent_tab_candidate_limit_bounds_the_cycle_regardless_of_overlay() throws {
+        let priorOverlay = Preferences.shared.showTabSwitcherOverlay
+        let priorCandidates = Preferences.shared.recentTabCandidates
+        defer {
+            Preferences.shared.showTabSwitcherOverlay = priorOverlay
+            Preferences.shared.recentTabCandidates = priorCandidates
+        }
+        let cases = [
+            (showsOverlay: true, limit: 3, expectedCount: 3),
+            (showsOverlay: true, limit: Preferences.unlimitedRecentTabCandidates, expectedCount: 6),
+            (showsOverlay: false, limit: 2, expectedCount: 2),
+            (showsOverlay: false, limit: Preferences.unlimitedRecentTabCandidates, expectedCount: 6),
+        ]
+
+        for testCase in cases {
+            Preferences.shared.showTabSwitcherOverlay = testCase.showsOverlay
+            Preferences.shared.recentTabCandidates = testCase.limit
+
+            let state = makeAppState()
+            let project = seedProject(state)
+            let workspace = try #require(state.workspaces[project.id])
+            for _ in 0 ..< 5 {
+                state.createTab(projectID: project.id, projects: [project])
+            }
+            let expectedOrder = Array(workspace.recencyOrder().prefix(testCase.expectedCount))
+
+            state.cycleRecentTab(projectID: project.id)
+
+            #expect(state.tabCycleTabIDs == expectedOrder)
+            state.commitTabCycle(projectID: project.id)
+        }
+    }
+
+    /// A cycle showing the switcher wakes the renderer of every pane it
+    /// offers and samples them until the modifier is released — an off-screen
+    /// renderer is parked and holds no frame, so without this the cards would
+    /// freeze at whatever each tab looked like when it was last left.
+    @Test
+    func cycling_with_the_switcher_keeps_offered_panes_rendering_until_commit() throws {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
+        Preferences.shared.showTabSwitcherOverlay = true
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let ws = try #require(state.workspaces[project.id])
+        let first = try #require(ws.activeTab?.focusedPane)
+        state.createTab(projectID: project.id, projects: [project])
+        let second = try #require(ws.activeTab?.focusedPane)
+        let firstView = first.ensureNSView()
+        let secondView = second.ensureNSView()
+
+        state.cycleRecentTab(projectID: project.id)
+
+        #expect(state.isTabCycling)
+        #expect(state.isLivePreviewing)
+        #expect(firstView.rendersForPreview)
+        #expect(secondView.rendersForPreview)
+
+        state.commitTabCycle(projectID: project.id)
+
+        #expect(!state.isTabCycling)
+        #expect(!state.isLivePreviewing)
+        #expect(!firstView.rendersForPreview)
+        #expect(!secondView.rendersForPreview)
+    }
+
+    /// With the overlay off there are no cards to keep current, so the
+    /// default cycling path must not wake a single off-screen renderer.
+    @Test
+    func cycling_without_the_switcher_wakes_no_renderer() throws {
+        let prior = Preferences.shared.showTabSwitcherOverlay
+        defer { Preferences.shared.showTabSwitcherOverlay = prior }
+        Preferences.shared.showTabSwitcherOverlay = false
+
+        let state = makeAppState()
+        let project = seedProject(state)
+        let ws = try #require(state.workspaces[project.id])
+        let first = try #require(ws.activeTab?.focusedPane)
+        state.createTab(projectID: project.id, projects: [project])
+        let second = try #require(ws.activeTab?.focusedPane)
+        let firstView = first.ensureNSView()
+        let secondView = second.ensureNSView()
+
+        state.cycleRecentTab(projectID: project.id)
+
+        #expect(state.isTabCycling)
+        #expect(!state.isLivePreviewing)
+        #expect(!firstView.rendersForPreview)
+        #expect(!secondView.rendersForPreview)
+
+        state.commitTabCycle(projectID: project.id)
     }
 }
 

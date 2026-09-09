@@ -10,6 +10,23 @@ import Testing
 /// developer's live app state.
 @MainActor
 struct PreferencesTests {
+    /// Unlimited by default, so introducing the limit changes nothing about
+    /// how far Recent Tab reaches on an existing install.
+    @Test
+    func recent_tab_candidates_default_to_unlimited_and_round_trip() {
+        let prior = Preferences.shared.recentTabCandidates
+        defer { Preferences.shared.recentTabCandidates = prior }
+
+        #expect(Preferences.shared.recentTabCandidates == Preferences.unlimitedRecentTabCandidates)
+        Preferences.shared.recentTabCandidates = 8
+        #expect(Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates) as? Int == 8)
+        Preferences.shared.recentTabCandidates = Preferences.unlimitedRecentTabCandidates
+        #expect(
+            Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates) as? Int
+                == Preferences.unlimitedRecentTabCandidates
+        )
+    }
+
     @Test
     func tab_switcher_overlay_defaults_on_and_round_trips() {
         let prior = Preferences.shared.showTabSwitcherOverlay
@@ -18,18 +35,6 @@ struct PreferencesTests {
         #expect(Preferences.shared.showTabSwitcherOverlay)
         Preferences.shared.showTabSwitcherOverlay = false
         #expect(!Preferences.defaults.bool(forKey: Preferences.Keys.showTabSwitcherOverlay))
-    }
-
-    @Test
-    func recent_tab_candidates_default_to_five_and_round_trip() {
-        let prior = Preferences.shared.recentTabCandidates
-        defer { Preferences.shared.recentTabCandidates = prior }
-
-        #expect(Preferences.shared.recentTabCandidates == 5)
-        Preferences.shared.recentTabCandidates = 8
-        #expect(Preferences.defaults.integer(forKey: Preferences.Keys.recentTabCandidates) == 8)
-        Preferences.shared.recentTabCandidates = 0
-        #expect(Preferences.defaults.integer(forKey: Preferences.Keys.recentTabCandidates) == 0)
     }
 
     @Test

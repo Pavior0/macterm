@@ -319,13 +319,17 @@ final class Preferences {
         didSet { defaults.set(showTabSwitcherOverlay, forKey: Keys.showTabSwitcherOverlay) }
     }
 
-    /// How many of the most recently used tabs the switcher offers while the
-    /// Recent Tab shortcut is held. Default 5 — the full recency order
-    /// upstream walks outgrows any window on a busy project and pushes the
-    /// interesting targets off the strip. Direct cycling (switcher off) is
-    /// unaffected and keeps the full order. `0` means unlimited; numeric
-    /// values are clamped to 2…12 on read so stale data cannot empty or flood
-    /// the strip.
+    /// Finite candidate counts offered in Settings and accepted from storage.
+    static let recentTabCandidateRange = 2 ... 12
+    /// The stored value meaning "every tab". Also the default, so an upgrade
+    /// changes nothing about how far the Recent Tab shortcut reaches.
+    static let unlimitedRecentTabCandidates = 0
+
+    /// How many of the most recent tabs the Recent Tab shortcut cycles
+    /// through, with or without the switcher showing —
+    /// `unlimitedRecentTabCandidates` for every tab. A tab past the limit is
+    /// unreachable by the gesture, so this bounds the cycle itself, not just
+    /// the cards the switcher draws; the two are always the same list.
     var recentTabCandidates: Int {
         didSet { defaults.set(recentTabCandidates, forKey: Keys.recentTabCandidates) }
     }
@@ -892,13 +896,10 @@ final class Preferences {
         return min(max(v, sidebarWidthRange.lowerBound), sidebarWidthRange.upperBound)
     }
 
-    /// Default and bounds for `recentTabCandidates`. The lower bound is 2 —
-    /// one candidate is nothing to switch to — and the upper bound keeps the
-    /// finite choice list manageable. Zero is the explicit unlimited choice.
+    /// One candidate cannot switch tabs, so a stored `1` reads as the floor.
     private static func clampRecentTabCandidates(_ v: Int?) -> Int {
-        guard let v else { return 5 }
-        if v == 0 { return 0 }
-        return min(max(v, 2), 12)
+        guard let v, v != unlimitedRecentTabCandidates else { return unlimitedRecentTabCandidates }
+        return min(max(v, recentTabCandidateRange.lowerBound), recentTabCandidateRange.upperBound)
     }
 
     private static func clampScrollSpeed(_ v: Double, fallback: Double) -> Double {
