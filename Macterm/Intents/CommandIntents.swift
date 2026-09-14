@@ -46,6 +46,7 @@ enum MactermKeybind: String, AppEnum {
     case newWindow = "new_window"
     case closeWindow = "close_window"
     case openProject = "open_project"
+    case toggleProjectSwitcher = "toggle_project_switcher"
     case zoomPane = "zoom_pane"
     case toggleCommandPalette = "toggle_command_palette"
     case reloadGhosttyConfig = "reload_ghostty_config"
@@ -95,6 +96,7 @@ enum MactermKeybind: String, AppEnum {
         .newWindow: "New Window",
         .closeWindow: "Close Window",
         .openProject: "Open Project",
+        .toggleProjectSwitcher: "Project Switcher",
         .zoomPane: "Zoom Pane",
         .toggleCommandPalette: "Command Palette",
         .reloadGhosttyConfig: "Reload Ghostty Config",
