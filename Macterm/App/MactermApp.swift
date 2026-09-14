@@ -75,6 +75,24 @@ struct MactermApp: App {
                 }
         }
         .defaultSize(width: 1200, height: 800)
+        // A folder opened WITH Macterm (Open With, a Dock-icon drop,
+        // `open -a`) arrives as an open-documents Apple Event, and SwiftUI
+        // answers one by opening a SECOND WindowGroup window — on top of the
+        // project `application(_:open:)` has just selected, so both windows
+        // land on one tab and the user gets a dimmed mirror in front and
+        // "Showing in another window" behind. That happens with our delegate
+        // method removed too (measured), so it is SwiftUI's own handling of
+        // the event, not ours. This is the native lever for it: the modifier
+        // names the external events for which SwiftUI opens a new instance of
+        // the scene, and Macterm emits none of its own — no URL scheme, no
+        // Handoff — so a condition nothing ever matches means no event opens
+        // a window. The set must be NON-EMPTY: `[]` reads as "handles no
+        // external events at all" and also silences
+        // `applicationOpenUntitledFile`, the one call that reliably builds a
+        // WindowGroup window — New Window, `window new` and #241's repair all
+        // went dead with the empty set, while a never-matching condition
+        // leaves them working.
+        .handlesExternalEvents(matching: ["macterm.no-external-events"])
         .commands {
             CommandGroup(replacing: .newItem) {
                 // Rendered from AppCommand like every other action, so the
@@ -209,9 +227,11 @@ struct MactermApp: App {
                     Button("Cancel", role: .cancel) {
                         appState.cancelPendingUnloadProject()
                     }
+                    .keyboardShortcut(.cancelAction)
                     Button("Unload", role: .destructive) {
                         appState.confirmPendingUnloadProject()
                     }
+                    .keyboardShortcut(.defaultAction)
                 } message: {
                     Text("A process is still running in this project. Unloading stops every process in its tabs; the layout is kept.")
                 }
@@ -225,9 +245,11 @@ struct MactermApp: App {
                     Button("Cancel", role: .cancel) {
                         appState.cancelPendingRemoveProject()
                     }
+                    .keyboardShortcut(.cancelAction)
                     Button("Remove", role: .destructive) {
                         appState.confirmPendingRemoveProject()
                     }
+                    .keyboardShortcut(.defaultAction)
                 } message: {
                     Text("A process is still running in this project. Removing it ends every process in its tabs.")
                 }
@@ -241,9 +263,11 @@ struct MactermApp: App {
                     Button("Cancel", role: .cancel) {
                         appState.cancelPendingLayoutApply()
                     }
+                    .keyboardShortcut(.cancelAction)
                     Button("Apply", role: .destructive) {
                         appState.confirmPendingLayoutApply()
                     }
+                    .keyboardShortcut(.defaultAction)
                 } message: {
                     if let pending = appState.pendingLayoutApply {
                         Text(pending.confirmationMessage)
@@ -297,9 +321,11 @@ struct CloseConfirmationAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {
                     appState.cancelPendingClosePane()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("Close", role: .destructive) {
                     appState.confirmPendingClosePane()
                 }
+                .keyboardShortcut(.defaultAction)
             } message: {
                 Text("A process is still running in this pane. Close it anyway?")
             }
@@ -313,9 +339,11 @@ struct CloseConfirmationAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {
                     appState.cancelPendingCloseTab()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("Close", role: .destructive) {
                     appState.confirmPendingCloseTab()
                 }
+                .keyboardShortcut(.defaultAction)
             } message: {
                 Text("A process is still running in this tab. Closing the tab ends it.")
             }
@@ -343,9 +371,11 @@ struct ProjectConfirmationAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {
                     appState.cancelPendingUnloadProject()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("Unload", role: .destructive) {
                     appState.confirmPendingUnloadProject()
                 }
+                .keyboardShortcut(.defaultAction)
             } message: {
                 Text("A process is still running in this project. Unloading stops every process in its tabs; the layout is kept.")
             }
@@ -359,9 +389,11 @@ struct ProjectConfirmationAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {
                     appState.cancelPendingRemoveProject()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("Remove", role: .destructive) {
                     appState.confirmPendingRemoveProject()
                 }
+                .keyboardShortcut(.defaultAction)
             } message: {
                 Text("A process is still running in this project. Removing it ends every process in its tabs.")
             }
@@ -375,9 +407,11 @@ struct ProjectConfirmationAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {
                     appState.cancelPendingBulkRemove()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("Remove", role: .destructive) {
                     appState.confirmPendingBulkRemove()
                 }
+                .keyboardShortcut(.defaultAction)
             } message: {
                 Text("A process is still running in one of the selected items. Removing them ends every process in their tabs.")
             }
@@ -405,9 +439,11 @@ struct LayoutAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {
                     appState.cancelPendingLayoutApply()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("Apply", role: .destructive) {
                     appState.confirmPendingLayoutApply()
                 }
+                .keyboardShortcut(.defaultAction)
             } message: {
                 if let pending = appState.pendingLayoutApply {
                     Text(pending.confirmationMessage)
@@ -463,6 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var windowObserver: Any?
     private var activateObserver: Any?
+    private var configObserver: Any?
     private var appFocusObservers: [Any] = []
     private var reconnectObservers: [Any] = []
     private var mainAppResponder: MainAppResponder?
@@ -475,6 +512,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// left the socket answering `starting` forever.
     private let controlServer = ControlSocketServer(socketPath: ControlSocketServer.defaultSocketPath())
     private var controlHandler: ControlHandler?
+    /// Finder's Services menu ("New Macterm Project Here"); registered as
+    /// `NSApp.servicesProvider` at launch and handed its targets in
+    /// `installResponders`. Requests in between are queued by the provider.
+    /// Its `open(paths:)` is also where a folder opened WITH Macterm lands
+    /// (`application(_:open:)`), so both gestures share one launch deferral.
+    let finderServices = FinderServiceProvider()
 
     /// Test seam: the window list the missing-window repair consults.
     var windowLister: () -> [NSWindow] = { NSApp.windows }
@@ -546,6 +589,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // get a `starting` error until installResponders attaches the
         // handler.
         controlServer.start()
+        // Registering here is what lets a Services-menu pick launch the app:
+        // AppKit delivers the pending request as soon as the provider exists.
+        NSApp.servicesProvider = finderServices
         UNUserNotificationCenter.current().delegate = NotificationHandler.shared
         NotificationHandler.shared.registerCategories()
         if BenchmarkControl.isEnabled {
@@ -555,11 +601,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             NotificationHandler.shared.requestAuthorization()
         }
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
+        // libghostty first: the activation policy comes out of the user's
+        // config (`macos-hidden`), so the config has to be loaded before the
+        // policy can be decided. This line used to sit two below.
         _ = GhosttyApp.shared
+        applyActivationPolicy(activating: true)
+        // Re-apply on every config change. `.mactermConfigDidChange` fires
+        // more often than a file reload (a window-opacity drag posts it too),
+        // which is harmless: `applyActivationPolicy` only calls AppKit when
+        // the policy actually disagrees with the config.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .mactermConfigDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyActivationPolicy(activating: false) }
+        }
         _ = QuickTerminalService.shared
         KeyRouter.shared.install()
+        // After the key router, so the local monitor is in place before any
+        // chord can be yielded to Carbon. This also registers the quick
+        // terminal's own chord — it is the one always-global action.
+        GlobalHotkeys.shared.install()
         // Dock-icon click on a hidden window: SwiftUI's
         // @NSApplicationDelegateAdaptor swallows applicationShouldHandleReopen,
         // and `didBecomeActiveNotification` doesn't always fire (e.g. when
@@ -808,6 +871,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openInitialWindow()
     }
 
+    /// Apply the user's ghostty `macos-hidden`: `.regular` (a Dock tile, a menu
+    /// bar, a ⌘-Tab entry) or `.accessory` (none of the three).
+    ///
+    /// Read from the config every time rather than cached, so a reload moves it
+    /// — the same two moments Ghostty.app applies the key. Setting the policy
+    /// AppKit already has is skipped, which is what makes the reload observer
+    /// safe to fire on every `.mactermConfigDidChange`.
+    ///
+    /// Accessory mode is deliberately narrower here than in Ghostty.app, which
+    /// creates no window at all in it: Macterm still builds its window, because
+    /// `MainWindow.onAppear` is what installs the responders and attaches the
+    /// control-socket handler. A windowless Macterm is #241's dead end, and an
+    /// accessory app has no Dock click left to escape it with — the quick
+    /// terminal's hotkey would be the only way in, and the CLI would answer
+    /// `starting` forever.
+    ///
+    /// `activating` is set only for the launch call, and it keeps the
+    /// `NSApp.activate()` the app has always done there. A later transition
+    /// *into* `.regular` activates too: AppKit hands an app the menu bar when
+    /// it activates, so a formerly-accessory app that merely changes policy sits
+    /// there without one.
+    ///
+    /// A launch that lands on `.accessory` does **not** end up frontmost, and
+    /// that is macOS, not a missing call: becoming an accessory hands the front
+    /// straight back (measured on a foreground `open` launch — `isActive` was
+    /// already false right after, and neither a plain `activate()` nor a forced
+    /// `activate(ignoringOtherApps: true)`, deferred a run-loop turn, held it).
+    /// So an accessory launch comes up with its window on screen but unfocused;
+    /// the quick terminal, a click, or `macterm window focus` — which does take
+    /// the front, see `MacosHidden.activateForWindowRequest` — is the way in.
+    func applyActivationPolicy(activating: Bool) {
+        let hidden = GhosttyApp.shared.macosHidden
+        let policy = hidden.activationPolicy
+        let previous = NSApp.activationPolicy()
+        if previous != policy {
+            logger.info("macos-hidden = \(hidden.rawValue, privacy: .public); activation policy applied")
+            NSApp.setActivationPolicy(policy)
+        }
+        guard activating || (previous == .accessory && policy == .regular) else { return }
+        NSApp.activate()
+    }
+
     /// Front the terminal window for an explicit user request ("Show Window"),
     /// opening it first if the launch never produced one.
     func showWindow() {
@@ -831,6 +936,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let handler = ControlHandler(appState: appState, projectStore: projectStore)
         controlHandler = handler
         controlServer.attach { raw in await handler.handle(raw) }
+        finderServices.attach(appState: appState, projectStore: projectStore)
+        // A global chord fired before this point can only toggle the quick
+        // terminal; every other action needs the workspace this hands over.
+        GlobalHotkeys.shared.attach(appState: appState, projectStore: projectStore)
+        // App Intents are instantiated by the system, so this is the only way
+        // they reach the app's state — same as the Finder service, and for the
+        // same reason (a shortcut can launch us, and its `perform()` arrives
+        // before the launch restore has run).
+        MactermIntentHost.shared.attach(appState: appState, projectStore: projectStore)
         KeyRouter.shared.register(PaletteResponder(appState: appState))
         KeyRouter.shared.register(QuickTerminalResponder())
         let mainResponder = MainAppResponder(appState: appState, projectStore: projectStore)
@@ -1011,5 +1125,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate()
         }
         return false
+    }
+
+    /// A folder opened with Macterm — Finder's "Open With", a drop on the Dock
+    /// icon, `open -a Macterm <dir>` — becomes a project, always a new one
+    /// (see `FolderOpenRequest`). Reached through SwiftUI's forwarding
+    /// delegate, which passes this method on to the adaptor; only
+    /// `public.directory` is declared in `Info.plist`, so a file here means
+    /// the plist was bypassed and it is dropped rather than guessed at.
+    ///
+    /// On a cold launch this arrives during launch handling, before the window
+    /// exists and before the launch restore has run, which is exactly what the
+    /// provider's queue and `AppState.performWhenRestored` absorb — the same
+    /// path a Services pick that launched the app takes.
+    func application(_: NSApplication, open urls: [URL]) {
+        let resolution = FolderOpenRequest.resolve(urls)
+        for url in resolution.skipped {
+            logger.info("open: ignoring non-folder \(url.absoluteString, privacy: .public)")
+        }
+        guard !resolution.directories.isEmpty else { return }
+        logger.info("open: \(resolution.directories.count, privacy: .public) folders as projects")
+        finderServices.open(paths: resolution.directories)
     }
 }

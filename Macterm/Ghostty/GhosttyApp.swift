@@ -132,6 +132,7 @@ final class GhosttyApp {
         }
         app = createdApp
         config = cfg
+        applyAppIcon()
 
         // Ticking is event-driven: libghostty's `wakeup_cb` fires whenever the
         // core needs `ghostty_app_tick` (GhosttyCallbacks.wakeup schedules it
@@ -247,8 +248,33 @@ final class GhosttyApp {
         if let old = config { ghostty_config_free(old) }
         config = newConfig
         configVersion += 1
+        applyAppIcon()
         NotificationCenter.default.post(name: .mactermConfigDidChange, object: nil)
         return result
+    }
+
+    // MARK: - App icon (`macos-icon`)
+
+    /// Install the icon the config asks for — on every load and reload, the
+    /// way Ghostty.app does, so unsetting the key or fixing the path takes
+    /// effect on the next reload without a relaunch. Both keys are read from
+    /// the loaded config rather than the raw text so a `config-file` include
+    /// counts; the decision itself is `GhosttyAppIcon`, the write is
+    /// `AppIconPresenter`.
+    private func applyAppIcon() {
+        let style = configCString(GhosttyAppIcon.styleKey)
+        let customPath = configCString(GhosttyAppIcon.customPathKey)
+        let icon = GhosttyAppIcon.resolve(style: style, customPath: customPath)
+        if GhosttyAppIcon.isGhosttyArtwork(style: style) {
+            logger.info(
+                "macos-icon = \(style ?? "", privacy: .public) names Ghostty artwork Macterm doesn't ship; using the bundled icon"
+            )
+        } else if GhosttyAppIcon.isCustom(style: style), icon == .bundled {
+            logger.warning(
+                "macos-custom-icon = \(customPath ?? "", privacy: .public) is not an absolute path; using the bundled icon"
+            )
+        }
+        AppIconPresenter.apply(icon)
     }
 
     /// Re-apply the *current* config object to the app and every live surface,
@@ -416,6 +442,20 @@ final class GhosttyApp {
         return String(bytes: UnsafeRawBufferPointer(start: ptr, count: Int(str.len)), encoding: .utf8)
     }
 
+    /// A key libghostty's C getter hands back as a bare C string: enums (their
+    /// tag name, e.g. `macos-icon`) and optional `[:0]const u8` values (e.g.
+    /// `macos-custom-icon`), per `src/config/c_get.zig`. Distinct from
+    /// `configString`, whose keys arrive as a `ghostty_string_s`. An unset
+    /// `?[:0]const u8` is the case to watch: the getter writes a null pointer
+    /// and still returns *true*, so the pointer — not the return value — is
+    /// what says the key is unset.
+    private func configCString(_ key: String) -> String? {
+        guard let config else { return nil }
+        var ptr: UnsafePointer<CChar>?
+        guard ghostty_config_get(config, &ptr, key, UInt(key.utf8.count)), let ptr else { return nil }
+        return String(cString: ptr)
+    }
+
     private func configBool(_ key: String, default defaultValue: Bool) -> Bool {
         guard let config else { return defaultValue }
         var value = defaultValue
@@ -428,7 +468,7 @@ final class GhosttyApp {
     /// The user's `bell-features` set. Same bit layout as Ghostty.app's
     /// `BellFeatures`; `title` and `border` exist in the config but Macterm
     /// implements only the app-level features (see `GhosttyCallbacks`'s
-    /// `RING_BELL` case).
+    /// `RING_BELL` case) plus `attention`'s Dock badge (`BellBadge`).
     struct BellFeatures: OptionSet {
         let rawValue: CUnsignedInt
         static let system = BellFeatures(rawValue: 1 << 0)
@@ -474,6 +514,27 @@ final class GhosttyApp {
     /// badge while secure input is active.
     var secureInputIndication: Bool {
         configBool("macos-secure-input-indication", default: true)
+    }
+
+    /// `macos-hidden`: whether the app runs as an accessory (no Dock tile, no
+    /// menu bar, no ⌘-Tab entry). Applied by `AppDelegate.applyActivationPolicy`.
+    var macosHidden: MacosHidden {
+        MacosHidden.resolve(configValue: configEnum(MacosHidden.key))
+    }
+
+    /// Read an enum-valued key as its ghostty tag name.
+    ///
+    /// Deliberately NOT `configString`: libghostty writes an enum's `@tagName`
+    /// as a bare NUL-terminated pointer, while `configString` hands it a
+    /// `ghostty_string_s` whose `len` then stays 0 — which is why the same call
+    /// reads *empty* for `window-colorspace` (see `GhosttyColorSpace`, which
+    /// went to the raw config text instead). Ghostty.app's own Swift reads
+    /// `macos-hidden` exactly this way.
+    private func configEnum(_ key: String) -> String? {
+        guard let config else { return nil }
+        var value: UnsafePointer<CChar>?
+        guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)), let value else { return nil }
+        return String(cString: value)
     }
 
     private func loadConfig() -> (ghostty_config_t?, ReloadResult) {

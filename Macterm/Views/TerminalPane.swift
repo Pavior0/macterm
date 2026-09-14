@@ -193,7 +193,9 @@ private struct TerminalSurface: NSViewRepresentable {
             }
             if focused {
                 AdaptiveTerminalChrome.shared.focusDidChange(to: view)
-                FocusRestoration.restoreFocus(to: pane.id, finder: { pane }, in: view.window)
+                // Not `in: view.window`: the host may not be in the window yet
+                // (see restoreFocusWhenAttached).
+                FocusRestoration.restoreFocusWhenAttached(to: pane.id, finder: { pane })
             }
         }
         context.coordinator.wasFocused = focused
@@ -240,9 +242,10 @@ private struct TerminalSurface: NSViewRepresentable {
             view.notifySurfaceFocused()
             // The user is looking at this pane now, so any banner still sitting
             // in Notification Center for it is stale. Same point Ghostty clears
-            // a surface's notifications from (`focusDidChange`).
+            // a surface's notifications — and its bell — from (`focusDidChange`).
             NotificationHandler.shared.clearDelivered(paneID: pane.id)
-            FocusRestoration.restoreFocus(to: pane.id, finder: { [pane] in pane }, in: view.window)
+            pane.acknowledgeBell()
+            FocusRestoration.restoreFocusWhenAttached(to: pane.id, finder: { [pane] in pane })
         } else if !focused, wasFocused {
             view.notifySurfaceUnfocused()
         }
@@ -350,6 +353,11 @@ private struct TerminalSurface: NSViewRepresentable {
             guard !(NSApp.isActive && view?.isFocused == true) else { return }
             NotificationHandler.shared.post(pane: pane, title: title, body: body)
         }
+        // Unconditional, unlike the notification above: whether the user is
+        // looking is decided centrally by `AppState` (which acknowledges a
+        // bell in the active tab of the active app on the spot), so the pane's
+        // tab and the badge can never disagree about what counts as seen.
+        view.onBell = { [weak pane] in pane?.ringBell() }
         view.onProgressStarted = { [weak pane] in
             guard Preferences.shared.showTabStatusIndicator else { return }
             pane?.refreshForegroundProcess()

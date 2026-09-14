@@ -135,8 +135,38 @@ final class AppState {
     /// sidebar state is known. `WindowAppearance`'s restore waits for it.
     private(set) var hasRestoredWindows = false
 
+    /// Work parked by `performWhenRestored` until the launch restore is done.
+    /// Ignored for observation: appending here is bookkeeping, not state a
+    /// view renders.
+    @ObservationIgnored private var deferredUntilRestored: [@MainActor () -> Void] = []
+
+    /// Run `work` now if the launch restore has finished, else right after it
+    /// does. For a request that reaches the app from outside during launch — a
+    /// Finder service that launched it, say — acting immediately would have
+    /// `restoreSelection` overwrite whatever the request selected a beat
+    /// later; acting after `restoreWindows` is the first moment the request's
+    /// effect sticks.
+    func performWhenRestored(_ work: @escaping @MainActor () -> Void) {
+        if hasRestoredWindows {
+            work()
+        } else {
+            deferredUntilRestored.append(work)
+        }
+    }
+
+    private func runDeferredUntilRestored() {
+        let work = deferredUntilRestored
+        deferredUntilRestored = []
+        for item in work {
+            item()
+        }
+    }
+
     func restoreWindows(adopting first: WindowState) {
-        defer { hasRestoredWindows = true }
+        defer {
+            hasRestoredWindows = true
+            runDeferredUntilRestored()
+        }
         let saved = savedWindowSnapshots
         savedWindowSnapshots = []
         // This runs after `restoreSelection`, which is the first moment the
@@ -271,6 +301,11 @@ final class AppState {
         if let nsWindow = nsWindow(for: window) {
             nsWindow.makeKeyAndOrderFront(nil)
         }
+        // An accessory app (`macos-hidden`) has neither a Dock tile nor a
+        // ⌘-Tab entry, so ordering the window front is only half the request:
+        // without activation nothing can be typed into it and there is no way
+        // for the user to finish the job by hand.
+        MacosHidden.activateForWindowRequest()
         noteKeyWindow(window)
     }
 
@@ -301,6 +336,8 @@ final class AppState {
         }
         if keyWindowID != showing.id, let nsWindow = nsWindow(for: showing) {
             nsWindow.makeKeyAndOrderFront(nil)
+            // See `focusWindow`: an accessory app can't be reached any other way.
+            MacosHidden.activateForWindowRequest()
         }
         // Becoming key mirrors the project; do it directly as well, for the
         // common caller that runs while the app is inactive and whose key
@@ -1105,6 +1142,20 @@ final class AppState {
     @ObservationIgnored
     var isAppActive: () -> Bool = { NSApp?.isActive ?? false }
 
+    /// The two seams of the Dock badge (`AppState+BellBadge.swift`), injectable
+    /// so tests can drive the feature set and read the label without the
+    /// developer's real ghostty config or the hosting app's Dock tile. The
+    /// default writer is the ONE AppKit write, `BellBadge.apply`.
+    @ObservationIgnored
+    var bellFeatures: () -> GhosttyApp.BellFeatures = { GhosttyApp.shared.bellFeatures }
+    @ObservationIgnored
+    var dockBadgeWriter: (String?) -> Void = { BellBadge.apply($0) }
+    /// The label last handed to `dockBadgeWriter`, so a sync that changes
+    /// nothing costs no AppKit round-trip (the badge is re-derived on every
+    /// structural save). Written only by `syncDockBadge`.
+    @ObservationIgnored
+    var dockBadgeLabel: String?
+
     /// Any on-screen window counts — including the quick terminal's
     /// non-activating panel. The surface incubator's window is ordered out and
     /// never becomes visible, so it never keeps polling alive.
@@ -1199,8 +1250,16 @@ final class AppState {
                 using: onQuietSettleDeadline
             )),
             (center, center.addObserver(
-                forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main, using: onEvent
-            )),
+                forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    // Coming to the front is both a poll event and the user
+                    // looking at whatever tab is showing — which is what
+                    // acknowledges its bell (`AppState+BellBadge`).
+                    self?.acknowledgeBellsInActiveTab()
+                    self?.notePollEvent()
+                }
+            }),
             (center, center.addObserver(
                 forName: NSApplication.didResignActiveNotification, object: nil, queue: .main, using: onEvent
             )),
@@ -1221,6 +1280,18 @@ final class AppState {
                     self?.zmxRetryBudget = 8
                     self?.notePollEvent()
                 }
+            }),
+            // The Dock badge (`BellBadge`) is derived state: re-derived when a
+            // pane's bell flag flips either way, and when a config reload may
+            // have brought the `attention` feature in or taken it out.
+            (center, center.addObserver(
+                forName: .terminalBellStateDidChange, object: nil, queue: .main
+            ) { [weak self] note in
+                guard let paneID = note.object as? UUID else { return }
+                MainActor.assumeIsolated { self?.paneBellStateDidChange(paneID: paneID) }
+            }),
+            (center, center.addObserver(forName: .mactermConfigDidChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.syncDockBadge() }
             }),
         ]
         pollEventObservers = tokens.map(\.1)
@@ -1516,6 +1587,8 @@ final class AppState {
                     )
                 }
         )
+        // A closed or unloaded tab takes its bell out of the count with it.
+        syncDockBadge()
     }
 
     // MARK: - Project
@@ -3701,9 +3774,34 @@ final class AppState {
 
     // MARK: - Focus
 
+    /// Hand first responder back to the pane the user is working in — the
+    /// palette closing, a sidebar rename ending, the overlay sidebar
+    /// collapsing.
+    ///
+    /// Resolved THROUGH the key window's view (#345): a window showing a
+    /// mirror of the tab renders the mirror's panes, not the real tab's, and
+    /// the real focused pane's NSView lives in the OTHER window — so the
+    /// window-blind lookup asked for a view that window does not contain and
+    /// silently retried until it gave up, leaving the mirror window typing
+    /// nowhere. The real view resolves to itself, so this is the same call it
+    /// always was for a single window.
+    ///
+    /// Only for a window that is actually KEY. "The pane the user is working
+    /// in" is otherwise a guess, and the fallback below is what every caller
+    /// has always got: with the quick terminal up, the panel holds key and its
+    /// own restore paths own the focus.
     func restoreFocusToActivePane() {
-        guard let projectID = activeProjectID,
-              let tab = workspaces[projectID]?.activeTab,
+        guard let projectID = activeProjectID else { return }
+        if let window = keyOrFirstWindow,
+           let nsWindow = nsWindow(for: window), nsWindow.isKeyWindow,
+           let view = viewTab(for: projectID, in: window),
+           let realPaneID = view.real.focusedPaneID,
+           let paneID = viewPaneID(forReal: realPaneID, in: view)
+        {
+            FocusRestoration.restoreFocus(to: paneID, in: view.tab.splitRoot, window: nsWindow)
+            return
+        }
+        guard let tab = workspaces[projectID]?.activeTab,
               let paneID = tab.focusedPaneID
         else { return }
         FocusRestoration.restoreFocus(
@@ -3718,6 +3816,9 @@ final class AppState {
         guard projectID == activeProjectID,
               let tab = workspaces[projectID]?.activeTab
         else { return false }
+        // The bell rides the same "looking at the active tab" verdict, but is
+        // transient — it never decides the save below.
+        tab.acknowledgeBell()
         let didAcknowledgeCompletion = tab.acknowledgeCommandCompletion()
         if didAcknowledgeCompletion, saveImmediately {
             saveWorkspaces()
