@@ -11,6 +11,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case appearance = "Appearance"
     case quickTerminal = "Quick Terminal"
     case keymaps = "Keymaps"
+    case experimental = "Experimental"
     case updates = "Updates"
 
     var id: String { rawValue }
@@ -23,6 +24,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
         case .appearance: "paintpalette"
         case .quickTerminal: "rectangle.bottomthird.inset.filled"
         case .keymaps: "keyboard"
+        case .experimental: "flask"
         case .updates: "arrow.triangle.2.circlepath"
         }
     }
@@ -77,6 +79,7 @@ struct SettingsView: View {
         case .appearance: AppearanceSettings()
         case .quickTerminal: QuickTerminalSettings()
         case .keymaps: KeymapSettings()
+        case .experimental: ExperimentalSettings()
         case .updates: UpdatesSettings()
         }
     }
@@ -445,9 +448,6 @@ private struct GeneralSettings: View {
     @State private var autoTilingEnabled: Bool = Preferences.shared.autoTilingEnabled
     @State private var backgroundSSHConnections: Bool = Preferences.shared.backgroundSSHConnections
     @State private var reconnectRemotePanes: Bool = Preferences.shared.reconnectRemotePanes
-    @State private var shortcutsAccess: ShortcutsAccess = Preferences.shared.shortcutsAccess
-    @State private var newTabWorkingDirectory: NewTerminalWorkingDirectory = Preferences.shared.newTabWorkingDirectory
-    @State private var newSplitWorkingDirectory: NewTerminalWorkingDirectory = Preferences.shared.newSplitWorkingDirectory
 
     /// Why session persistence is inactive, when it is. Missing binary is a
     /// dev-build state; an over-budget socket path is an environment problem
@@ -459,8 +459,6 @@ private struct GeneralSettings: View {
         return "Session persistence is inactive: this system's zmx socket path is too long. Terminals run without persistence."
     }
 
-    @State
-    private var terminalScrollSpeed: Double = Preferences.shared.terminalScrollSpeed
     /// Ghostty's default locations form an optional base layer. Custom files
     /// always load afterward in their displayed order.
     @State
@@ -548,39 +546,6 @@ private struct GeneralSettings: View {
                 }
             }
 
-            Section("Terminal") {
-                Picker("New tab directory", selection: $newTabWorkingDirectory) {
-                    ForEach(NewTerminalWorkingDirectory.allCases) { directory in
-                        Text(directory.displayName).tag(directory)
-                    }
-                }
-                .onChange(of: newTabWorkingDirectory) { _, directory in
-                    Preferences.shared.newTabWorkingDirectory = directory
-                }
-
-                Picker("New split directory", selection: $newSplitWorkingDirectory) {
-                    ForEach(NewTerminalWorkingDirectory.allCases) { directory in
-                        Text(directory.displayName).tag(directory)
-                    }
-                }
-                .onChange(of: newSplitWorkingDirectory) { _, directory in
-                    Preferences.shared.newSplitWorkingDirectory = directory
-                }
-
-                SettingsSlider(
-                    label: "Scroll speed",
-                    value: $terminalScrollSpeed,
-                    range: 0.25 ... 3.0,
-                    step: nil,
-                    display: { String(format: "%.2f×", $0) }
-                )
-                .onChange(of: terminalScrollSpeed) { _, v in
-                    Preferences.shared.terminalScrollSpeed = v
-                }
-                Text("Scrollback speed for trackpads and mouse wheels.")
-                    .settingsCaption()
-            }
-
             Section("Layout") {
                 Toggle("Auto-tile panes", isOn: $autoTilingEnabled)
                     .onChange(of: autoTilingEnabled) { _, v in
@@ -607,22 +572,6 @@ private struct GeneralSettings: View {
                 Text(
                     "Reattaches a disconnected pane's session when you wake "
                         + "the Mac or return to the app."
-                )
-                .settingsCaption()
-            }
-
-            Section("Shortcuts") {
-                Picker("Allow Shortcuts to control \(appDisplayName)", selection: $shortcutsAccess) {
-                    ForEach(ShortcutsAccess.allCases) { access in
-                        Text(access.displayName).tag(access)
-                    }
-                }
-                .onChange(of: shortcutsAccess) { _, v in
-                    Preferences.shared.shortcutsAccess = v
-                }
-                Text(
-                    "Shortcuts and Spotlight actions can create projects and tabs, "
-                        + "and type into your terminals. Ask confirms once per launch."
                 )
                 .settingsCaption()
             }
@@ -1820,6 +1769,62 @@ private struct HotkeyCaptureView: NSViewRepresentable {
 }
 
 // MARK: - Updates
+
+/// Features that work but haven't earned a permanent home yet: each is off
+/// by default, does nothing to a user who never opens this pane, and is
+/// expected to either graduate into a regular pane or be removed. Keep the
+/// pane honest — a toggle that has shipped for a while without complaint
+/// belongs elsewhere.
+private struct ExperimentalSettings: View {
+    @State
+    private var smoothScrolling: Bool = Preferences.shared.smoothScrolling
+    @State
+    private var smoothCursor: Bool = Preferences.shared.smoothCursor
+    @State
+    private var cursorTrail: Bool = Preferences.shared.cursorTrail
+    @State
+    private var animatedSplits: Bool = Preferences.shared.animatedSplits
+
+    var body: some View {
+        Form {
+            Section("Scrolling") {
+                Toggle("Smooth scrolling", isOn: $smoothScrolling)
+                    .onChange(of: smoothScrolling) { _, v in
+                        Preferences.shared.smoothScrolling = v
+                    }
+                Text(
+                    "Trackpad scrolling moves scrollback by pixels instead of whole rows. "
+                        + "Programs that draw their own screen (editors, pagers) still scroll by rows."
+                )
+                .settingsCaption()
+            }
+
+            Section("Cursor") {
+                Toggle("Smooth cursor", isOn: $smoothCursor)
+                    .onChange(of: smoothCursor) { _, v in
+                        Preferences.shared.smoothCursor = v
+                    }
+                Text("The cursor glides between positions instead of jumping.")
+                    .settingsCaption()
+
+                Toggle("Cursor trail", isOn: $cursorTrail)
+                    .onChange(of: cursorTrail) { _, v in
+                        Preferences.shared.cursorTrail = v
+                    }
+                Text("A fading streak follows the cursor across larger moves.")
+                    .settingsCaption()
+            }
+
+            Section("Splits") {
+                Toggle("Animate splits", isOn: $animatedSplits)
+                    .onChange(of: animatedSplits) { _, v in
+                        Preferences.shared.animatedSplits = v
+                    }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
 
 private struct UpdatesSettings: View {
     /// `Updater` is `@Observable`; read the singleton directly (Observation

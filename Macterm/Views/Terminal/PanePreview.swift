@@ -47,12 +47,29 @@ struct PanePreview {
     /// a reliable "nothing new was drawn" and lets the live sampling skip the
     /// copy for a pane that is sitting still. nil when there is no frame.
     let frameID: IOSurfaceID?
+    /// The display's backing scale when the frame was taken. `image.size` is
+    /// in pixels; divided by this it is the size the pane occupied on screen
+    /// in points — what a ghost must draw it at, since the pane may have been
+    /// mid-resize and smaller than the tile the model gives it.
+    let pixelsPerPoint: CGFloat
 
-    init(image: NSImage?, background: NSColor, aspectRatio: CGFloat?, frameID: IOSurfaceID? = nil) {
+    init(
+        image: NSImage?,
+        background: NSColor,
+        aspectRatio: CGFloat?,
+        frameID: IOSurfaceID? = nil,
+        pixelsPerPoint: CGFloat = 1
+    ) {
         self.image = image
         self.background = background
         self.aspectRatio = aspectRatio
         self.frameID = frameID
+        self.pixelsPerPoint = pixelsPerPoint
+    }
+
+    /// `image`'s on-screen size in points, or nil without an image.
+    var pointSize: CGSize? {
+        image.map { CGSize(width: $0.size.width / pixelsPerPoint, height: $0.size.height / pixelsPerPoint) }
     }
 }
 
@@ -70,8 +87,22 @@ enum PanePreviewCapture {
     /// on the layer is the very one it was sampled from, nothing has been
     /// drawn since and it is returned as is — the live sampling's whole cost
     /// is the copy, and a pane at rest should cost it nothing.
+    ///
+    /// `longEdge` bounds the stored image; nil keeps the frame's own pixel
+    /// size. `fillsBackground` paints the pane's background under the frame
+    /// (a card needs an opaque thumbnail); false keeps the frame as the
+    /// renderer wrote it — unpainted cells transparent, painted ones at the
+    /// user's `background-opacity` — so drawn over the window's own tint it
+    /// looks exactly like the live pane did. The closing-pane ghost in
+    /// `AnimatedSplitView` takes both: full size, no fill, because an opaque
+    /// ghost in a translucent window flashes to full opacity for the slide.
     @MainActor
-    static func capture(_ pane: Pane, reusing previous: PanePreview? = nil) -> PanePreview {
+    static func capture(
+        _ pane: Pane,
+        reusing previous: PanePreview? = nil,
+        longEdge: CGFloat? = thumbnailLongEdge,
+        fillsBackground: Bool = true
+    ) -> PanePreview {
         let background = pane.adaptiveBackgroundColor.map { NSColor(cgColor: $0) ?? MactermTheme.nsBg }
             ?? MactermTheme.nsBg
         guard let view = pane.nsView else {
@@ -85,14 +116,18 @@ enum PanePreviewCapture {
             return previous
         }
         let image = surface.flatMap {
-            thumbnail(from: $0, colorSpace: view.surfaceColorSpace, over: background)
+            thumbnail(
+                from: $0, colorSpace: view.surfaceColorSpace,
+                over: fillsBackground ? background : nil, longEdge: longEdge
+            )
         }
         let aspect = image.map { $0.size.width / max($0.size.height, 1) }
         return PanePreview(
             image: image,
             background: background,
             aspectRatio: aspect,
-            frameID: image == nil ? nil : surface.map { IOSurfaceGetID($0) }
+            frameID: image == nil ? nil : surface.map { IOSurfaceGetID($0) },
+            pixelsPerPoint: view.window?.backingScaleFactor ?? 1
         )
     }
 
@@ -125,7 +160,8 @@ enum PanePreviewCapture {
     private static func thumbnail(
         from surface: IOSurface,
         colorSpace: NSColorSpace,
-        over background: NSColor
+        over background: NSColor?,
+        longEdge: CGFloat?
     ) -> NSImage? {
         let width = IOSurfaceGetWidth(surface)
         let height = IOSurfaceGetHeight(surface)
@@ -172,18 +208,20 @@ enum PanePreviewCapture {
             )
         else { return nil }
 
-        return composite(frame, over: background, colorSpace: cgColorSpace)
+        return composite(frame, over: background, colorSpace: cgColorSpace, longEdge: longEdge)
     }
 
-    /// Scale `frame` down to `thumbnailLongEdge` and paint it over the pane's
-    /// background so transparent (unpainted) cells read as the terminal's own
-    /// color instead of the glass behind the card.
+    /// Scale `frame` down to `longEdge` (nil: keep its size) and paint it over
+    /// the pane's background so transparent (unpainted) cells read as the
+    /// terminal's own color instead of the glass behind the card — or over
+    /// nothing (nil), keeping the frame's own alpha.
     private static func composite(
         _ frame: CGImage,
-        over background: NSColor,
-        colorSpace: CGColorSpace
+        over background: NSColor?,
+        colorSpace: CGColorSpace,
+        longEdge: CGFloat?
     ) -> NSImage? {
-        let scale = min(1, thumbnailLongEdge / CGFloat(max(frame.width, frame.height)))
+        let scale = longEdge.map { min(1, $0 / CGFloat(max(frame.width, frame.height))) } ?? 1
         let size = CGSize(
             width: max(1, (CGFloat(frame.width) * scale).rounded()),
             height: max(1, (CGFloat(frame.height) * scale).rounded())
@@ -201,8 +239,10 @@ enum PanePreviewCapture {
         else { return nil }
 
         let rect = CGRect(origin: .zero, size: size)
-        ctx.setFillColor((background.usingColorSpace(.sRGB) ?? background).cgColor)
-        ctx.fill(rect)
+        if let background {
+            ctx.setFillColor((background.usingColorSpace(.sRGB) ?? background).cgColor)
+            ctx.fill(rect)
+        }
         // Medium, not high: the card shows this at a fraction of its size
         // again, and high-quality resampling of a full retina frame was the
         // other half of the live sampling's cost.
