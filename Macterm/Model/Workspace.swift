@@ -168,7 +168,7 @@ final class TerminalTab: Identifiable {
     }
 
     /// Split the focused pane (or a specific pane) in `direction`, placing the
-    /// new pane in the `.second` position. Returns the new pane ID if created.
+    /// new pane at `position`. Returns the new pane ID if created.
     /// A `command` spawns in the new pane via libghostty's `initial_input`
     /// (the layout `run:` path — typed into the fresh shell verbatim).
     /// `newPaneWorkingDirectory` overrides cwd inheritance without changing
@@ -177,6 +177,7 @@ final class TerminalTab: Identifiable {
     func split(
         paneID: UUID,
         direction: SplitDirection,
+        position: SplitPosition = .second,
         command: String? = nil,
         newPaneWorkingDirectory: String? = nil
     ) -> UUID? {
@@ -202,7 +203,7 @@ final class TerminalTab: Identifiable {
         let (newRoot, newID) = splitRoot.splitting(
             paneID: paneID,
             direction: direction,
-            position: .second,
+            position: position,
             projectPath: sourcePath,
             projectID: sourceProjectID,
             command: command
@@ -224,14 +225,14 @@ final class TerminalTab: Identifiable {
     /// would move it away from the pane they are actually using — and, once
     /// leadership follows focus, would hand the pty size to the new view for
     /// no reason.
-    func mirror(paneID: UUID, direction: SplitDirection) -> UUID? {
+    func mirror(paneID: UUID, direction: SplitDirection, position: SplitPosition) -> UUID? {
         guard let source = splitRoot.findPane(id: paneID) else { return nil }
         let mirrored = Pane(mirroring: source)
         let (newRoot, inserted) = splitRoot.inserting(
             pane: mirrored,
             at: paneID,
             direction: direction,
-            position: .second
+            position: position
         )
         guard inserted else { return nil }
         splitRoot = newRoot
