@@ -3000,17 +3000,7 @@ final class AppState {
 
     // MARK: - Splits
 
-    /// Low-level split that preserves source-pane cwd inheritance.
-    func splitPane(direction: SplitDirection, projectID: UUID) {
-        guard let tab = workspaces[projectID]?.activeTab,
-              let paneID = tab.focusedPaneID
-        else { return }
-        logger.debug("splitPane: \(String(describing: direction), privacy: .public) pane=\(paneID, privacy: .public)")
-        tab.split(paneID: paneID, direction: direction)
-        saveWorkspaces()
-    }
-
-    /// Splits the focused pane using the user's new split directory preference.
+    /// Splits the focused pane using the ghostty key the user configured.
     func splitPane(direction: SplitDirection, projectID: UUID, projects: [Project]) {
         guard let tab = workspaces[projectID]?.activeTab,
               let paneID = tab.focusedPaneID,
