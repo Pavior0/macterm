@@ -101,7 +101,11 @@ Macterm's own settings — window opacity, sidebar behavior, quick-terminal size
 
 ## Cookbook
 
-Workflows and recipes from the community — the layouts, keybinds, and scripts people actually run to get more out of Macterm. Three to start with: [one <kbd>⌃hjkl</kbd> chord that moves between nvim's splits *and* Macterm's panes](https://github.com/thdxg/macterm/discussions/217), [driving an interactive program from a script](https://github.com/thdxg/macterm/discussions/218), and [giving a coding agent control of Macterm](https://github.com/thdxg/macterm/discussions/219).
+Workflows and recipes from the community — the layouts, keybinds, and scripts people actually run to get more out of Macterm. For example: 
+- [one <kbd>⌃hjkl</kbd> chord that moves between nvim's splits *and* Macterm's panes](https://github.com/thdxg/macterm/discussions/217)
+- [driving an interactive program from a script](https://github.com/thdxg/macterm/discussions/218)
+- [giving a coding agent control of Macterm](https://github.com/thdxg/macterm/discussions/219)
+- [Neovim plugin for moving focus between Neovim splits and MacTerm panes with the same directional keybindings](https://github.com/thdxg/macterm/discussions/459)
 
 Got a recipe of your own? [Start a Cookbook topic](https://github.com/thdxg/macterm/discussions/new?category=cookbook) — anyone can post, and anyone can borrow.
 
