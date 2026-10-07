@@ -269,7 +269,7 @@ extension AppCommand {
         case .passwordManager:
             // The master switch covers on-demand filling too.
             guard Preferences.shared.passwordManagerEnabled else { return nil }
-            return { ctx.appState.openCommandPalette(scope: .passwords) }
+            return { ctx.appState.toggleCommandPalette(scope: .passwords) }
         case .checkForUpdate:
             // Always present in the palette; the guard only no-ops when a check
             // is already in flight (canCheckForUpdates flips false during one).
@@ -290,7 +290,7 @@ extension AppCommand {
     func paletteDisabledHint(in ctx: AppCommandContext) -> String? {
         // Off by the master switch: say where it is rather than vanish.
         if self == .passwordManager {
-            return Preferences.shared.passwordManagerEnabled ? nil : "Turned off in Settings → Passwords"
+            return Preferences.shared.passwordManagerEnabled ? nil : "Turned off in Settings → Password Manager"
         }
         guard self == .applyLayout,
               let projectID = ctx.appState.activeProjectID,
