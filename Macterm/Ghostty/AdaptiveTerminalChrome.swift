@@ -63,7 +63,7 @@ final class AdaptiveTerminalChrome {
             clearPresentation(of: view)
         }
         for window in windows {
-            WindowAppearance.updateTerminalPaintRegions(in: window, rects: [])
+            WindowAppearance.updateTerminalPaintRegions(in: window, regions: [])
             GhosttyApp.shared.adoptAdaptiveBackgroundColor(nil, for: window)
         }
     }
@@ -95,22 +95,39 @@ final class AdaptiveTerminalChrome {
     }
 
     /// OSC 11 is explicit terminal-native evidence and takes effect
-    /// immediately; inferred IOSurface colors retain two-observation
-    /// stabilization.
-    func terminalBackgroundDidChange(_ color: NSColor, in view: GhosttyTerminalNSView) {
+    /// immediately, over whatever inference holds (`currentCandidate`);
+    /// inferred IOSurface colors retain two-observation stabilization.
+    ///
+    /// A report is presented, never written into the inference state. It
+    /// used to reset the stabilizer to the reported color, which left the
+    /// pane's *sampled* color — the presentation's fallback — wherever
+    /// inference had last put it. libghostty reports a program's OSC 111
+    /// (Helix sends one on quit) as a change *to the configured background*,
+    /// which this read as "no candidate" and answered by resetting the
+    /// stabilizer to clear: the stale sampled color became the presentation,
+    /// and every later observation of the unpainted shell was a no-op against
+    /// a stabilizer already clear — a tint hole over bare material that only
+    /// a new surface's config reload could repair. Inference keeps running
+    /// under a report, so withdrawing it lands on a current color and the
+    /// TUI's exit clears the way any other exit does.
+    func terminalBackgroundDidChange(_: NSColor, in view: GhosttyTerminalNSView) {
         guard shouldHandleEvent(from: view) else { return }
-        let candidate = effectiveCandidate(color)
-        var stabilizer = stabilizers[view.paneID] ?? AdaptiveTerminalBackgroundStabilizer()
-        stabilizer.reset(to: candidate)
-        stabilizers[view.paneID] = stabilizer
         refreshPresentation(for: monitoredViews())
+        // The repaint that comes with the report moves the paint too, and the
+        // hole under a translucently reported color is cut from the sampled
+        // geometry.
+        requestSamplingBurst(delay: 0.12, retries: 2)
     }
 
+    /// The surface's config changed and its report no longer stands
+    /// (`GhosttyTerminalNSView.surfaceConfigDidChange`). The presentation
+    /// falls back to the inferred color, which is current — see
+    /// `terminalBackgroundDidChange` — and is re-judged against the new
+    /// configured background by the samples that follow.
     func terminalBackgroundDidReset(in view: GhosttyTerminalNSView) {
         guard shouldHandleEvent(from: view) else { return }
-        stabilizers[view.paneID] = AdaptiveTerminalBackgroundStabilizer()
-        view.sampledDominantBackgroundColor = nil
-        scheduleSample(delay: 0)
+        refreshPresentation(for: monitoredViews())
+        requestSamplingBurst(delay: 0, retries: 2)
     }
 
     private func scheduleSample(delay: TimeInterval) {
@@ -170,12 +187,11 @@ final class AdaptiveTerminalChrome {
         var stabilizer = stabilizers[id]
             ?? AdaptiveTerminalBackgroundStabilizer(seededWith: view.sampledDominantBackgroundColor)
 
-        if let reported = effectiveCandidate(view.reportedBackgroundColor) {
-            stabilizer.reset(to: reported)
-            stabilizers[id] = stabilizer
-            return false
-        }
-
+        // A reported (OSC 11) color is presented over whatever this finds
+        // (`currentCandidate`) but never stops inference: the sampled color
+        // and paint geometry stay current, which is what the presentation
+        // falls back to the moment the report is withdrawn, and what cuts the
+        // tint under a translucently reported paint.
         var paintedBounds: CGRect?
         let candidate: NSColor? = if let surface = view.layer?.contents as? IOSurface {
             effectiveCandidate(
@@ -261,17 +277,22 @@ final class AdaptiveTerminalChrome {
         // tinted backdrop under it is a second layer of the same color: the
         // pane composites to `1-(1-opacity)²` while the chrome stays at plain
         // `opacity`, which reads as the TUI being far more solid than the app
-        // around it. Hand those regions to the backdrop so it cuts its tint
-        // there and both surfaces carry exactly one tinted layer.
+        // around it. Hand those panes to the backdrop so it cuts its tint
+        // under them, refilling the unpainted margin — libghostty's
+        // `window-padding` — in the pane's own color, so a split pane's
+        // padding matches its TUI rather than framing it in the theme.
         if let previous = lastPaintRegionWindow, previous !== window, !isOverlayPanel {
-            WindowAppearance.updateTerminalPaintRegions(in: previous, rects: [])
+            WindowAppearance.updateTerminalPaintRegions(in: previous, regions: [])
         }
         WindowAppearance.updateTerminalPaintRegions(
             in: window,
-            rects: zip(views, candidates).compactMap { view, color in
-                guard let color, Self.paneFill(color) == nil, let rect = view.sampledPaintedRect
-                else { return nil }
-                return view.convert(rect, to: nil)
+            regions: zip(views, candidates).compactMap { view, color in
+                Self.paintRegion(
+                    color: color,
+                    frame: view.bounds,
+                    paintedRect: view.sampledPaintedRect,
+                    hiddenInLayout: view.hiddenInLayout
+                ).map { $0.inWindow(of: view) }
             }
         )
         // A lone pane can lend its color to the whole window. In a split, each
@@ -292,9 +313,84 @@ final class AdaptiveTerminalChrome {
         color.alphaComponent >= 0.999 ? color : nil
     }
 
+    /// The pane's claim on the window tint (in the pane's coordinates): its
+    /// whole frame cut out and refilled in its color, except under its paint.
+    /// Nil when it claims none: no detected color, an opaque one (the pane
+    /// fill stands in for the tint there), no sampled paint yet — or a pane
+    /// the layout is holding invisible behind a zoomed sibling.
+    ///
+    /// That last case is why this is a rule and not two guards inline. A
+    /// zoomed-away pane stays mounted at opacity 0 with its frame, its
+    /// remembered color and its sampled paint intact, so unzoom can slide it
+    /// back without re-detecting. Every one of those is right to keep; the
+    /// hole is not. A hole is only correct while the terminal's own paint is
+    /// on top of it, and with the pane invisible the cut showed the bare
+    /// material — the desktop through the window — inside whatever pane was
+    /// zoomed over it.
+    static func paintRegion(
+        color: NSColor?,
+        frame: CGRect,
+        paintedRect: CGRect?,
+        hiddenInLayout: Bool
+    ) -> TerminalPaintRegion? {
+        guard !hiddenInLayout, let color, paneFill(color) == nil, let paintedRect else { return nil }
+        return TerminalPaintRegion(frame: frame, painted: paintedRect, color: color.withAlphaComponent(1).cgColor)
+    }
+
+    /// The animated split layout hid this pane behind a zoomed sibling, or
+    /// brought it back.
+    ///
+    /// Hiding republishes at once: the pane fades out over the split
+    /// animation, and its hole has to close before the fade lets the material
+    /// show through — a fading pane over a restored tint merely reads a shade
+    /// more solid on its way out. Revealing waits the animation out instead,
+    /// for the mirror-image reason: the pane fades *in*, so a hole cut at the
+    /// start of the fade is the same bare-material flash. The wait is
+    /// `SplitAnimation.duration` whether or not Reduce Motion skipped the
+    /// animation; under Reduce Motion that costs a fully visible pane a
+    /// double-tinted third of a second, which is not visible at these
+    /// opacities.
+    func layoutVisibilityDidChange(_ view: GhosttyTerminalNSView) {
+        guard Preferences.shared.adaptiveTerminalChromeEnabled else { return }
+        if view.hiddenInLayout {
+            // Still in the monitored set — the layout hides it, not the
+            // window — so the republish reads the flag off it and drops the
+            // hole.
+            guard shouldHandleEvent(from: view) else { return }
+            refreshPresentation(for: monitoredViews())
+        } else {
+            requestSamplingBurst(delay: SplitAnimation.duration, retries: 2)
+        }
+    }
+
     private func currentCandidate(for view: GhosttyTerminalNSView) -> NSColor? {
-        effectiveCandidate(view.reportedBackgroundColor)
-            ?? effectiveCandidate(view.sampledDominantBackgroundColor)
+        reportedCandidate(for: view) ?? effectiveCandidate(view.sampledDominantBackgroundColor)
+    }
+
+    /// The pane's OSC 11 report as a candidate, carrying the alpha the
+    /// renderer paints it at. libghostty hands the report over as an RGB
+    /// triple — the color the program asked for — and it used to be taken as
+    /// opaque, which under the user's `background-opacity-cells` is wrong: the
+    /// cells carrying that color are painted at the window opacity, and an
+    /// opaque candidate answered them with an opaque pane fill and no tint
+    /// hole, the one solid slab in a translucent window. Helix 25.07 reports
+    /// its theme's background on `:theme`, which is where it showed.
+    private func reportedCandidate(for view: GhosttyTerminalNSView) -> NSColor? {
+        guard let reported = view.reportedBackgroundColor else { return nil }
+        let alpha = Self.reportedPaintAlpha(
+            backgroundOpacityCells: GhosttyApp.shared.backgroundOpacityCells,
+            windowOpacity: Preferences.shared.windowOpacity
+        )
+        return effectiveCandidate(reported.withAlphaComponent(alpha))
+    }
+
+    /// The alpha a terminal paints a reported background at — the rule the
+    /// renderer applies to every explicitly colored cell
+    /// (`renderer/generic.zig`): the window opacity under
+    /// `background-opacity-cells`, opaque otherwise. Macterm forces
+    /// `background-opacity` to the window opacity, so the two agree.
+    static func reportedPaintAlpha(backgroundOpacityCells: Bool, windowOpacity: Double) -> CGFloat {
+        backgroundOpacityCells ? CGFloat(max(0, min(1, windowOpacity))) : 1
     }
 
     private func updateRetryTimer(isNeeded: Bool) {

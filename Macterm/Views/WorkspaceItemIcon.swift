@@ -8,12 +8,8 @@ struct TabStatusIcon: View {
     let index: Int
     var agent: AgentIcon?
     var spinnerOverAgent = true
-    @AppStorage(Preferences.Keys.sidebarIconSize, store: Preferences.defaults)
-    private var iconSizeRaw = SidebarIconSize.medium.rawValue
-
-    private var size: SidebarIconSize {
-        SidebarIconSize(rawValue: iconSizeRaw) ?? .medium
-    }
+    @AppStorage(Preferences.Keys.sidebarIconSize)
+    private var size: SidebarIconSize
 
     private var spinnerControlSize: ControlSize {
         size == .small ? .mini : .small
@@ -61,14 +57,10 @@ struct WorkspaceItemIcon: View {
     let symbol: String
     let index: Int
     var agent: AgentIcon?
-    @AppStorage(Preferences.Keys.sidebarIconSize, store: Preferences.defaults)
-    private var iconSizeRaw = SidebarIconSize.medium.rawValue
+    @AppStorage(Preferences.Keys.sidebarIconSize)
+    private var size: SidebarIconSize
     @ScaledMetric(relativeTo: .body)
     private var agentIconSize: CGFloat = 15
-
-    private var size: SidebarIconSize {
-        SidebarIconSize(rawValue: iconSizeRaw) ?? .medium
-    }
 
     var body: some View {
         if let agent {

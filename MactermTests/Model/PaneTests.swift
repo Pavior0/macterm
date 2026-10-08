@@ -181,6 +181,150 @@ struct PaneTests {
         #expect(p.executionState == .running)
     }
 
+    // MARK: - Progress failure (OSC 9;4 ERROR)
+
+    /// The state a SET leaves a pane in once it has had input: a
+    /// progress-owned run.
+    private func progressRunningPane() -> Pane {
+        let p = Pane(projectPath: "/", projectID: UUID())
+        p.recordUserInteraction()
+        p.markCommandRunning()
+        return p
+    }
+
+    @Test
+    func progressError_endsTheRunAsAFailure() {
+        let p = progressRunningPane()
+        p.markProgressFinished(failed: true)
+        #expect(p.executionState == .done)
+        #expect(p.completionFailed)
+    }
+
+    @Test
+    func progressRemove_endsTheRunAsASuccess() {
+        let p = progressRunningPane()
+        p.markProgressFinished()
+        #expect(p.executionState == .done)
+        #expect(!p.completionFailed)
+    }
+
+    /// SET → ERROR → REMOVE: a program clears its bar after reporting the
+    /// error, and that REMOVE finds the pane already `.done`.
+    @Test
+    func removeAfterError_leavesTheFailureStanding() {
+        let p = progressRunningPane()
+        p.markProgressFinished(failed: true)
+        p.markProgressFinished()
+        #expect(p.executionState == .done)
+        #expect(p.completionFailed)
+    }
+
+    /// The shell's own completion edge (OSC 133;D) lands after the failed
+    /// program exits, on a pane that is already `.done`.
+    @Test
+    func commandFinishedAfterError_leavesTheFailureStanding() {
+        let p = progressRunningPane()
+        p.markProgressFinished(failed: true)
+        p.markCommandFinished()
+        #expect(p.executionState == .done)
+        #expect(p.completionFailed)
+    }
+
+    /// ERROR → SET (a retry) → REMOVE: the retry is a new run, and it passed.
+    @Test
+    func retryAfterError_endsGreen() {
+        let p = progressRunningPane()
+        p.markProgressFinished(failed: true)
+        p.markCommandRunning()
+        #expect(p.executionState == .running)
+        #expect(!p.completionFailed)
+        p.markProgressFinished()
+        #expect(p.executionState == .done)
+        #expect(!p.completionFailed)
+    }
+
+    /// An ERROR with no run to end marks nothing, so the retry after it
+    /// still ends green.
+    @Test
+    func errorBeforeAnyRun_marksNothing() {
+        let p = Pane(projectPath: "/", projectID: UUID())
+        p.recordUserInteraction()
+        p.markProgressFinished(failed: true)
+        #expect(p.executionState == .idle)
+        #expect(!p.completionFailed)
+        p.markCommandRunning()
+        p.markProgressFinished()
+        #expect(p.executionState == .done)
+        #expect(!p.completionFailed)
+    }
+
+    /// A program can exit straight after its ERROR, so the foreground refresh
+    /// that runs before the report is applied may already have settled the
+    /// run. The failure still lands on it.
+    @Test
+    func errorAfterTheRunAlreadySettled_stillFails() {
+        let p = Pane(projectPath: "/", projectID: UUID())
+        p.recordUserInteraction()
+        p.applyForegroundRefresh(name: "cargo", foregroundPID: 42)
+        p.markCommandRunning()
+        p.applyForegroundRefresh(name: shellName(), foregroundPID: 43, foregroundIsShell: true)
+        #expect(p.executionState == .done)
+        p.markProgressFinished(failed: true)
+        #expect(p.executionState == .done)
+        #expect(p.completionFailed)
+    }
+
+    /// Publishing `.done` wakes the poll synchronously, and the poll can save
+    /// the workspace on the spot, so the failure must already be set by then.
+    @Test
+    func theFailureIsSetBeforeDoneIsPublished() {
+        let p = progressRunningPane()
+        let seenAtDone = LockedBox<Bool?>(nil)
+        let token = NotificationCenter.default.addObserver(
+            forName: .terminalPollEvent,
+            object: nil,
+            queue: nil
+        ) { _ in
+            MainActor.assumeIsolated {
+                guard p.executionState == .done else { return }
+                seenAtDone.mutate { $0 = p.completionFailed }
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        p.markProgressFinished(failed: true)
+
+        #expect(seenAtDone.value == true)
+    }
+
+    @Test
+    func acknowledgingAFailure_clearsItLikeASuccess() {
+        let p = progressRunningPane()
+        p.markProgressFinished(failed: true)
+        #expect(p.acknowledgeCommandCompletion())
+        #expect(p.executionState == .idle)
+        #expect(!p.completionFailed)
+    }
+
+    @Test
+    func interactingWithAFailedPane_clearsTheFailure() {
+        let p = progressRunningPane()
+        p.markProgressFinished(failed: true)
+        p.recordUserInteraction()
+        #expect(p.executionState == .idle)
+        #expect(!p.completionFailed)
+    }
+
+    @Test
+    func restoredFailure_staysRedUntilAcknowledged() {
+        let p = Pane(projectPath: "/", projectID: UUID())
+        p.restoreNeedsAttention(failed: true)
+        #expect(p.executionState == .done)
+        #expect(p.completionFailed)
+        p.acknowledgeCommandCompletion()
+        #expect(!p.completionFailed)
+    }
+
     @Test
     func commandFinishedFromIdle_staysIdle() {
         // Shell integration emits OSC 133;D on every precmd, including empty
@@ -483,6 +627,63 @@ struct PaneTests {
     func pane_has_no_agent_without_a_foreground_pid() {
         let pane = Pane(projectPath: "/", projectID: UUID())
         pane.applyForegroundRefresh(name: nil, foregroundPID: nil, argv0: { "claude" })
+        #expect(pane.agentIcon == nil)
+    }
+
+    @Test
+    func remote_pane_matches_an_agent_from_the_probe() {
+        let pane = Pane(projectPath: "me@host.example:proj", projectID: UUID())
+        pane.applyRemoteForeground(RemoteForeground(comm: "/opt/homebrew/bin/codex", command: "codex --yolo"))
+        #expect(pane.agentIcon == .codex)
+    }
+
+    @Test
+    func remote_pane_matches_a_version_named_agent_by_its_command_line() {
+        // Claude Code's native install: macOS `ps -o comm=` gives the versioned
+        // binary's path, and only args names the CLI.
+        let pane = Pane(projectPath: "me@host.example:proj", projectID: UUID())
+        pane.applyRemoteForeground(RemoteForeground(
+            comm: "/Users/me/.local/share/claude/versions/2.1.207",
+            isIdle: false,
+            command: "claude --resume"
+        ))
+        #expect(pane.agentIcon == .claude)
+    }
+
+    @Test
+    func remote_pane_matches_an_interpreter_run_agent_by_its_script() {
+        let pane = Pane(projectPath: "me@host.example:proj", projectID: UUID())
+        pane.applyRemoteForeground(RemoteForeground(
+            comm: "node",
+            isIdle: false,
+            command: "node /usr/local/lib/node_modules/@google/gemini-cli/bin/gemini"
+        ))
+        #expect(pane.agentIcon == .gemini)
+    }
+
+    @Test
+    func remote_pane_loses_its_agent_when_the_shell_returns() {
+        let pane = Pane(projectPath: "me@host.example:proj", projectID: UUID())
+        pane.applyRemoteForeground(RemoteForeground(comm: "2.1.207", isIdle: false, command: "claude"))
+        #expect(pane.agentIcon == .claude)
+        pane.applyRemoteForeground(RemoteForeground(comm: "-zsh", isIdle: true, command: "-zsh"))
+        #expect(pane.agentIcon == nil)
+    }
+
+    @Test
+    func remote_pane_keeps_its_agent_through_a_probe_blip() {
+        // nil (session missing from a successful probe) changes nothing, as
+        // for the name and the command.
+        let pane = Pane(projectPath: "me@host.example:proj", projectID: UUID())
+        pane.applyRemoteForeground(RemoteForeground(comm: "2.1.207", isIdle: false, command: "claude"))
+        pane.applyRemoteForeground(nil)
+        #expect(pane.agentIcon == .claude)
+    }
+
+    @Test
+    func remote_pane_shows_no_agent_for_an_ordinary_program() {
+        let pane = Pane(projectPath: "me@host.example:proj", projectID: UUID())
+        pane.applyRemoteForeground(RemoteForeground(comm: "btop", isIdle: false, command: "btop --utf-force"))
         #expect(pane.agentIcon == nil)
     }
 

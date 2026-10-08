@@ -33,38 +33,39 @@ struct RemoteForegroundResolverTests {
     // MARK: - Probe output parsing
 
     @Test
-    func parses_session_tab_comm_tab_idleflag_tab_args_lines() {
+    func parses_session_tab_comm_tab_flags_tab_args_lines() {
         // Garbage and non-macterm sessions drop; an empty args field is a
         // nil command.
         let out = """
-        macterm-api-abc123\tbtop\t0\tbtop --utf-force
-        macterm-api-def456\t/usr/local/bin/hx\t0\t
+        macterm-api-abc123\tbtop\t0\t0\tbtop --utf-force
+        macterm-api-def456\t/usr/local/bin/hx\t0\t0\t
         garbage line
-        supa-other\tvim\t0\tvim
-        macterm-empty\t\t\t
+        supa-other\tvim\t0\t0\tvim
+        macterm-empty\t\t\t\t
         """
         let map = RemoteForegroundResolver.parseProbeOutput(out)
         #expect(map == [
-            "macterm-api-abc123": RemoteForeground(comm: "btop", isIdle: false, command: "btop --utf-force"),
-            "macterm-api-def456": RemoteForeground(comm: "/usr/local/bin/hx", isIdle: false, command: nil),
+            "macterm-api-abc123": RemoteForeground(comm: "btop", isIdle: false, isShell: false, command: "btop --utf-force"),
+            "macterm-api-def456": RemoteForeground(comm: "/usr/local/bin/hx", isIdle: false, isShell: false, command: nil),
         ])
     }
 
     @Test
-    func parses_the_host_idle_flag() {
-        // `1` = the session leader's group owns the tty (shell at prompt),
-        // `0` = another group holds the foreground, empty/garbage = the pgid
-        // read failed on the host — unknown, never invented.
+    func parses_the_host_idle_and_shell_flags() {
+        // Idle: `1` = the session leader's group owns the tty (shell at
+        // prompt), `0` = another group holds the foreground. Shell: `1` = the
+        // host's /etc/shells lists comm. Empty/garbage = the host couldn't
+        // say — unknown, never invented.
         let out = """
-        macterm-api-idle\t-bash\t1\t-bash
-        macterm-api-busy\tbtop\t0\tbtop
-        macterm-api-unknown\thx\t\thx
-        macterm-api-garbage\tvim\tmaybe\tvim
+        macterm-api-idle\t-bash\t1\t1\t-bash
+        macterm-api-busy\tbtop\t0\t0\tbtop
+        macterm-api-unknown\thx\t\t\thx
+        macterm-api-garbage\tvim\tmaybe\tmaybe\tvim
         """
         let map = RemoteForegroundResolver.parseProbeOutput(out)
         #expect(map == [
-            "macterm-api-idle": RemoteForeground(comm: "-bash", isIdle: true, command: "-bash"),
-            "macterm-api-busy": RemoteForeground(comm: "btop", isIdle: false, command: "btop"),
+            "macterm-api-idle": RemoteForeground(comm: "-bash", isIdle: true, isShell: true, command: "-bash"),
+            "macterm-api-busy": RemoteForeground(comm: "btop", isIdle: false, isShell: false, command: "btop"),
             "macterm-api-unknown": RemoteForeground(comm: "hx", isIdle: nil, command: "hx"),
             "macterm-api-garbage": RemoteForeground(comm: "vim", isIdle: nil, command: "vim"),
         ])
@@ -73,19 +74,21 @@ struct RemoteForegroundResolverTests {
     @Test
     func args_keep_embedded_tabs_and_short_lines_still_parse() {
         // The args field is the unsplit remainder of the line (a command line
-        // may itself contain tabs) — which is why the fixed-width idle flag
-        // sits BEFORE it. Two- and three-field lines (degraded probes)
+        // may itself contain tabs) — which is why the fixed-width flags sit
+        // BEFORE it. Two- to four-field lines (degraded probes)
         // degrade to comm-only / command-less foregrounds.
         let out = """
-        macterm-api-abc123\tnode\t0\tnode server.js\t--flag
+        macterm-api-abc123\tnode\t0\t0\tnode server.js\t--flag
         macterm-api-legacy\thx
         macterm-api-flagonly\thx\t0
+        macterm-api-noshell\thx\t0\t
         """
         let map = RemoteForegroundResolver.parseProbeOutput(out)
         #expect(map == [
-            "macterm-api-abc123": RemoteForeground(comm: "node", isIdle: false, command: "node server.js\t--flag"),
+            "macterm-api-abc123": RemoteForeground(comm: "node", isIdle: false, isShell: false, command: "node server.js\t--flag"),
             "macterm-api-legacy": RemoteForeground(comm: "hx", isIdle: nil, command: nil),
             "macterm-api-flagonly": RemoteForeground(comm: "hx", isIdle: false, command: nil),
+            "macterm-api-noshell": RemoteForeground(comm: "hx", isIdle: false, isShell: nil, command: nil),
         ])
     }
 
@@ -95,19 +98,34 @@ struct RemoteForegroundResolverTests {
     func probes_once_per_host_within_the_interval() async {
         let calls = LockedBox<[String]>([])
         let resolver = RemoteForegroundResolver(minInterval: 3)
+        let panes = [remotePane(), remotePane()]
+        // The probe names both sessions: a listing that missed one would
+        // re-arm its request (the registration race), which bypasses the
+        // interval this test is about.
+        let listing = Dictionary(uniqueKeysWithValues: panes.map {
+            ($0.sessionName, RemoteForeground(comm: "bash", isIdle: true, command: nil))
+        })
         let probe: @Sendable (ProjectPath, String?) async -> RemoteProbeOutcome = { spec, _ in
             if case let .remote(_, host, _) = spec { calls.mutate { $0.append(host) } }
-            return .success([:])
+            return .success(listing)
         }
-        let panes = [remotePane(), remotePane()]
         let t0 = Date()
 
+        // Every wait below also waits for `isIdle`: the probe closure runs
+        // when the probe STARTS, but the host stays inflight until `finish`
+        // runs on the main actor, and a refresh landing in between is dropped
+        // by the inflight guard — never retried, so a wait on the next call
+        // would time out (a loaded CI runner hit exactly that).
         resolver.refresh(panes: panes, probe: probe, now: t0)
+        await waitUntil { calls.value == ["devbox"] && resolver.isIdle }
+
+        // Within the interval, with nothing inflight: the interval alone throttles.
         resolver.refresh(panes: panes, probe: probe, now: t0.addingTimeInterval(1))
-        await waitUntil { calls.value == ["devbox"] }
+        await waitUntil { resolver.isIdle }
+        #expect(calls.value == ["devbox"])
 
         resolver.refresh(panes: panes, probe: probe, now: t0.addingTimeInterval(4))
-        await waitUntil { calls.value == ["devbox", "devbox"] }
+        await waitUntil { calls.value == ["devbox", "devbox"] && resolver.isIdle }
     }
 
     @Test
@@ -125,8 +143,11 @@ struct RemoteForegroundResolverTests {
             return .success([session: RemoteForeground(comm: "bash", isIdle: true, command: nil)])
         }
         let t0 = Date()
+        // Wait for the probe to finish, not just start: a refresh while the
+        // host is still inflight is dropped by the inflight guard, which would
+        // pass the throttle checks below without exercising the interval.
         resolver.refresh(panes: [pane], probe: probe, now: t0)
-        await waitUntil { calls.value == ["devbox"] }
+        await waitUntil { calls.value == ["devbox"] && resolver.isIdle }
 
         // Within the interval with no boundary: throttled.
         resolver.refresh(panes: [pane], probe: probe, now: t0.addingTimeInterval(1))
@@ -136,7 +157,7 @@ struct RemoteForegroundResolverTests {
         // A command boundary (#210's remote mirror) bypasses the interval…
         pane.noteRemoteCommandBoundary()
         resolver.refresh(panes: [pane], probe: probe, now: t0.addingTimeInterval(2))
-        await waitUntil { calls.value == ["devbox", "devbox"] }
+        await waitUntil { calls.value == ["devbox", "devbox"] && resolver.isIdle }
 
         // …and the fired probe consumes the request, restoring the throttle.
         #expect(!pane.remoteProbePending)
@@ -215,6 +236,107 @@ struct RemoteForegroundResolverTests {
         await waitUntil { resolver.isIdle }
         // Silent degradation: the name froze instead of flapping to nil.
         #expect(pane.foregroundProcessName == "btop")
+    }
+
+    // MARK: - Remote title confirmation (#473)
+
+    private let claude = RemoteForeground(comm: "2.1.289", isIdle: false, command: "claude")
+
+    /// A remote pane whose agent just finished a turn: its title is on screen
+    /// and waits on the next probe.
+    private func paneAfterATurn() -> Pane {
+        let pane = remotePane()
+        pane.isRemoteProbingEnabled = { true }
+        pane.applyRemoteForeground(claude)
+        pane.recordUserInteraction()
+        pane.markCommandRunning()
+        pane.receiveRemoteReportedTitle("◐ task")
+        pane.markProgressFinished()
+        return pane
+    }
+
+    @Test(arguments: [RemoteProbeOutcome.unreachable, .authRefused])
+    func a_probe_that_cannot_answer_drops_a_waiting_title(outcome: RemoteProbeOutcome) async {
+        let pane = paneAfterATurn()
+        #expect(pane.awaitsRemoteTitleConfirmation)
+        let resolver = RemoteForegroundResolver(minInterval: 0)
+        resolver.refresh(panes: [pane], probe: { _, _ in outcome })
+        await waitUntil { !pane.awaitsRemoteTitleConfirmation }
+        #expect(pane.programTitle == nil)
+    }
+
+    @Test
+    func a_listing_miss_on_a_named_pane_keeps_the_title_waiting() async {
+        // A blip, as for the name: the next answer decides.
+        let pane = paneAfterATurn()
+        let resolver = RemoteForegroundResolver(minInterval: 0)
+        resolver.refresh(panes: [pane], probe: { _, _ in .success([:]) })
+        await waitUntil { resolver.isIdle }
+        #expect(pane.awaitsRemoteTitleConfirmation)
+        #expect(pane.programTitle == "◐ task")
+    }
+
+    @Test
+    func a_suspended_host_drops_a_waiting_title_without_probing() async {
+        let calls = LockedBox<Int>(0)
+        let resolver = RemoteForegroundResolver(minInterval: 0)
+        let probe: @Sendable (ProjectPath, String?) async -> RemoteProbeOutcome = { _, _ in
+            calls.mutate { $0 += 1 }
+            return .authRefused
+        }
+        let pane = remotePane()
+        pane.isRemoteProbingEnabled = { true }
+        resolver.refresh(panes: [pane], probe: probe)
+        await waitUntil { calls.value == 1 && resolver.isIdle }
+
+        // The same pane, so the host stays suspended.
+        pane.applyRemoteForeground(claude)
+        pane.recordUserInteraction()
+        pane.markCommandRunning()
+        pane.receiveRemoteReportedTitle("◐ task")
+        pane.markProgressFinished()
+        #expect(pane.awaitsRemoteTitleConfirmation)
+        resolver.refresh(panes: [pane], probe: probe)
+        #expect(calls.value == 1)
+        #expect(!pane.awaitsRemoteTitleConfirmation)
+        #expect(pane.programTitle == nil)
+    }
+
+    @Test
+    func the_probe_confirms_a_title_held_before_it_went_out() async {
+        let pane = remotePane()
+        pane.isRemoteProbingEnabled = { true }
+        pane.applyRemoteForeground(claude)
+        pane.receiveRemoteReportedTitle("✳ task")
+        let session = pane.sessionName
+        let resolver = RemoteForegroundResolver(minInterval: 0)
+        resolver.refresh(panes: [pane], probe: { [claude] _, _ in .success([session: claude]) })
+        await waitUntil { pane.programTitle == "✳ task" }
+    }
+
+    @Test
+    func a_title_held_while_the_probe_is_out_waits_for_the_next() async {
+        let release = LockedBox(false)
+        let pane = remotePane()
+        pane.isRemoteProbingEnabled = { true }
+        pane.applyRemoteForeground(claude)
+        let session = pane.sessionName
+        let probe: @Sendable (ProjectPath, String?) async -> RemoteProbeOutcome = { [claude] _, _ in
+            while !release.value {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+            return .success([session: claude])
+        }
+        let resolver = RemoteForegroundResolver(minInterval: 0)
+        resolver.refresh(panes: [pane], probe: probe)
+        pane.receiveRemoteReportedTitle("✳ task")
+        release.mutate { $0 = true }
+        await waitUntil { resolver.isIdle }
+        #expect(pane.programTitle == nil)
+        #expect(pane.awaitsRemoteTitleConfirmation)
+
+        resolver.refresh(panes: [pane], probe: probe)
+        await waitUntil { pane.programTitle == "✳ task" }
     }
 
     // MARK: - Auth-refusal gate (#272)

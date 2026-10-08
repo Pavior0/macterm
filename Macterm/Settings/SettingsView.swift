@@ -9,10 +9,21 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case general = "General"
     case projects = "Projects"
     case appearance = "Appearance"
-    case quickTerminal = "Quick Terminal"
+    case animations = "Animations"
     case keymaps = "Keymaps"
-    case experimental = "Experimental"
+    case quickTerminal = "Quick Terminal"
+    case widgets = "Widgets"
+    case palettes = "Palettes"
+    case passwords = "Password Manager"
     case updates = "Updates"
+
+    /// The sidebar's groups, separated by a gap: the app itself, then the
+    /// things it puts on screen beyond the terminal window, then updates.
+    static let groups: [[SettingsPane]] = [
+        [.general, .projects, .appearance, .animations, .keymaps],
+        [.quickTerminal, .widgets, .palettes, .passwords],
+        [.updates],
+    ]
 
     var id: String { rawValue }
     var title: String { rawValue }
@@ -22,9 +33,12 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .projects: "folder"
         case .appearance: "paintpalette"
+        case .animations: "wand.and.sparkles"
         case .quickTerminal: "rectangle.bottomthird.inset.filled"
+        case .widgets: "widget.small"
         case .keymaps: "keyboard"
-        case .experimental: "flask"
+        case .palettes: "command"
+        case .passwords: "key"
         case .updates: "arrow.triangle.2.circlepath"
         }
     }
@@ -50,9 +64,15 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            List(SettingsPane.allCases, selection: $selection) { pane in
-                NavigationLink(value: pane) {
-                    Label(pane.title, systemImage: pane.symbol)
+            List(selection: $selection) {
+                ForEach(Array(SettingsPane.groups.enumerated()), id: \.offset) { _, group in
+                    Section {
+                        ForEach(group) { pane in
+                            NavigationLink(value: pane) {
+                                Label(pane.title, systemImage: pane.symbol)
+                            }
+                        }
+                    }
                 }
             }
             .navigationSplitViewColumnWidth(Self.sidebarWidth)
@@ -77,9 +97,12 @@ struct SettingsView: View {
         case .general: GeneralSettings()
         case .projects: ProjectsSettings()
         case .appearance: AppearanceSettings()
+        case .animations: AnimationsSettings()
         case .quickTerminal: QuickTerminalSettings()
+        case .widgets: WidgetsSettings()
         case .keymaps: KeymapSettings()
-        case .experimental: ExperimentalSettings()
+        case .palettes: PalettesSettings()
+        case .passwords: PasswordsSettings()
         case .updates: UpdatesSettings()
         }
     }
@@ -327,6 +350,23 @@ private enum SettingsWindowChrome {
             height: SettingsView.windowMinHeight
         )
     }
+
+    /// Makes the titlebar draggable again after a `Slider` drag.
+    ///
+    /// Once a slider's tracking loop ends, a titlebar drag stops moving this
+    /// window — the press reaches `NSThemeFrame` and nothing moves — until
+    /// something makes AppKit hand the window server its drag state again: a
+    /// click in the content, a pane switch, a programmatic move. `isMovable`
+    /// still reads true and the hit test lands on the toolbar throughout, so
+    /// nothing readable is wrong; flipping `isMovable` and back is the public
+    /// call that re-sends it (measured: the flip restores the drag, attaching
+    /// a debugger alone does not). Restores the prior value rather than
+    /// assuming true.
+    static func refreshWindowDrag(of window: NSWindow) {
+        let movable = window.isMovable
+        window.isMovable = !movable
+        window.isMovable = movable
+    }
 }
 
 // MARK: - Shared styling
@@ -407,6 +447,8 @@ private struct SettingsSlider: View {
     var step: Double?
     let display: (Double) -> String
 
+    @State private var host = HostWindow()
+
     var body: some View {
         // The `Slider` dims itself inside a `.disabled(_:)` scope, but the
         // flanking `Text`s are not controls and wouldn't follow on their own.
@@ -415,14 +457,57 @@ private struct SettingsSlider: View {
                 .frame(width: Self.labelWidth, alignment: .leading)
                 .dimsWhenDisabled()
             if let step {
-                Slider(value: $value, in: range, step: step)
+                Slider(value: $value, in: range, step: step, onEditingChanged: editingChanged)
             } else {
-                Slider(value: $value, in: range)
+                Slider(value: $value, in: range, onEditingChanged: editingChanged)
             }
             Text(display(value))
                 .monospacedDigit()
                 .frame(width: Self.valueWidth, alignment: .trailing)
                 .dimsWhenDisabled()
+        }
+        .background(HostWindowReader(host: host))
+    }
+
+    /// Once a drag ends, restore the window's titlebar drag — see
+    /// `SettingsWindowChrome.refreshWindowDrag`. Deferred a turn so the
+    /// slider's tracking loop has fully unwound first.
+    private func editingChanged(_ editing: Bool) {
+        guard !editing else { return }
+        DispatchQueue.main.async {
+            guard let window = host.window else { return }
+            SettingsWindowChrome.refreshWindowDrag(of: window)
+        }
+    }
+}
+
+/// The window a view is in, for the few AppKit calls SwiftUI has no route to.
+/// A class so the reader can fill it in without an update cycle.
+@MainActor
+private final class HostWindow {
+    weak var window: NSWindow?
+}
+
+private struct HostWindowReader: NSViewRepresentable {
+    let host: HostWindow
+
+    func makeNSView(context _: Context) -> NSView {
+        let view = Probe()
+        view.host = host
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context _: Context) {
+        (nsView as? Probe)?.host = host
+        host.window = nsView.window
+    }
+
+    private final class Probe: NSView {
+        weak var host: HostWindow?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            host?.window = window
         }
     }
 }
@@ -448,6 +533,7 @@ private struct GeneralSettings: View {
     @State private var autoTilingEnabled: Bool = Preferences.shared.autoTilingEnabled
     @State private var backgroundSSHConnections: Bool = Preferences.shared.backgroundSSHConnections
     @State private var reconnectRemotePanes: Bool = Preferences.shared.reconnectRemotePanes
+    @State private var textFilePlacement: TextFilePlacement = Preferences.shared.textFilePlacement
 
     /// Why session persistence is inactive, when it is. Missing binary is a
     /// dev-build state; an over-budget socket path is an environment problem
@@ -527,9 +613,7 @@ private struct GeneralSettings: View {
                     .help("Re-read your Ghostty config. Click after saving external edits.")
                 }
             } header: {
-                HStack {
-                    Text("Ghostty Config")
-                    Spacer()
+                DocsSectionHeader("Ghostty Config", docs: .ghosttyConfig) {
                     // Mirrors the Projects pane's add affordance: a plus in the
                     // header, with the creation paths in its menu.
                     Menu {
@@ -555,7 +639,22 @@ private struct GeneralSettings: View {
                     .settingsCaption()
             }
 
-            Section("Remote Projects") {
+            Section {
+                Picker("Open in", selection: $textFilePlacement) {
+                    ForEach(TextFilePlacement.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .onChange(of: textFilePlacement) { _, v in
+                    Preferences.shared.textFilePlacement = v
+                }
+                Text("Opens files in your shell's $VISUAL or $EDITOR.")
+                    .settingsCaption()
+            } header: {
+                DocsSectionHeader("Text Files", docs: .textFiles)
+            }
+
+            Section {
                 Toggle("Background SSH connections", isOn: $backgroundSSHConnections)
                     .onChange(of: backgroundSSHConnections) { _, v in
                         Preferences.shared.backgroundSSHConnections = v
@@ -574,6 +673,8 @@ private struct GeneralSettings: View {
                         + "the Mac or return to the app."
                 )
                 .settingsCaption()
+            } header: {
+                DocsSectionHeader("Remote Projects", docs: .remoteProjects)
             }
 
             // Shells always keep running after quit and reattach on the next
@@ -1017,16 +1118,13 @@ private struct AppearanceSettings: View {
     @State private var showAgentIcons: Bool = Preferences.shared.showAgentIcons
     @State private var showTabStatusIndicator: Bool = Preferences.shared.showTabStatusIndicator
     @State private var showSpinnerOverAgentIcons: Bool = Preferences.shared.showSpinnerOverAgentIcons
-    @State private var autoNameTabs: Bool = Preferences.shared.autoNameTabs
     @State private var autoAssignProjectColors: Bool = Preferences.shared.autoAssignProjectColors
     @State private var peekSidebarWhenHidden: Bool = Preferences.shared.peekSidebarWhenHidden
     @State private var showNewProjectButton: Bool = Preferences.shared.showNewProjectButton
     @State private var workspaceTabLayout: WorkspaceTabLayout = Preferences.shared.workspaceTabLayout
     @State private var showProjectNewTabButton: Bool = Preferences.shared.showProjectNewTabButton
-    @State private var tabSwitcherVisibility: String = Preferences.shared.tabSwitcherVisibility.rawValue
     @State private var showTabSwitcherOverlay: Bool = Preferences.shared.showTabSwitcherOverlay
     @State private var recentTabCandidates: Int = Preferences.shared.recentTabCandidates
-    @State private var tabSwitcherPosition: String = Preferences.shared.tabSwitcherPosition.rawValue
     @State
     private var backgroundOpacity: Double = Preferences.shared.windowOpacity
     @State
@@ -1039,10 +1137,20 @@ private struct AppearanceSettings: View {
     private var adaptiveTerminalChrome: Bool = Preferences.shared.adaptiveTerminalChromeEnabled
     @State
     private var sidebarPeekStyle: SidebarPeekStyle = Preferences.shared.sidebarPeekStyle
+    /// The toolbar controls bind to `Preferences` directly rather than a
+    /// seeded `@State` copy: each can also change from the toolbar's own
+    /// right-click menu (`ToolbarMenu`), and a copy would go stale under an
+    /// open Settings window.
+    @Bindable private var preferences = Preferences.shared
+
     /// Inverted view of `Preferences.hideTitleBar`: the control reads as
     /// "Show toolbar" (on by default), the preference stores the hide.
-    @State
-    private var showToolbar: Bool = !Preferences.shared.hideTitleBar
+    private var showToolbar: Binding<Bool> {
+        Binding(
+            get: { !preferences.hideTitleBar },
+            set: { preferences.hideTitleBar = !$0 }
+        )
+    }
 
     var body: some View {
         Form {
@@ -1121,10 +1229,12 @@ private struct AppearanceSettings: View {
                     .settingsCaption()
 
                 Group {
-                    Picker("Peek style", selection: $sidebarPeekStyle) {
+                    Picker(selection: $sidebarPeekStyle) {
                         ForEach(SidebarPeekStyle.allCases) { style in
                             Text(style.displayName).tag(style)
                         }
+                    } label: {
+                        Text("Peek style").dimsWhenDisabled()
                     }
                     .onChange(of: sidebarPeekStyle) { _, style in
                         Preferences.shared.sidebarPeekStyle = style
@@ -1133,6 +1243,7 @@ private struct AppearanceSettings: View {
                         .settingsCaption()
                 }
                 .disabled(!peekSidebarWhenHidden)
+                .padding(.leading, 16)
 
                 Picker("Project icon", selection: $projectIconSymbol) {
                     ForEach(Preferences.projectIconChoices, id: \.self) { name in
@@ -1156,13 +1267,6 @@ private struct AppearanceSettings: View {
                 .onChange(of: sidebarIconSize) { _, v in
                     Preferences.shared.sidebarIconSize = SidebarIconSize(rawValue: v) ?? .medium
                 }
-
-                Toggle("Auto-name tabs", isOn: $autoNameTabs)
-                    .onChange(of: autoNameTabs) { _, v in
-                        Preferences.shared.autoNameTabs = v
-                    }
-                Text("Shows subdirectories and running programs in tab titles. When off, tabs show the shell or host name.")
-                    .settingsCaption()
 
                 Toggle("Auto-assign project colors", isOn: $autoAssignProjectColors)
                     .onChange(of: autoAssignProjectColors) { _, v in
@@ -1198,7 +1302,7 @@ private struct AppearanceSettings: View {
                 .disabled(!(showTabStatusIndicator && showAgentIcons))
                 .padding(.leading, 16)
 
-                Toggle("Show New Project button", isOn: $showNewProjectButton)
+                Toggle("Show new project button", isOn: $showNewProjectButton)
                     .onChange(of: showNewProjectButton) { _, v in Preferences.shared.showNewProjectButton = v }
                 Text("When hidden, create projects via the command palette or context menu.")
                     .settingsCaption()
@@ -1236,41 +1340,32 @@ private struct AppearanceSettings: View {
             }
 
             Section("Toolbar") {
-                Toggle("Show toolbar", isOn: $showToolbar)
-                    .onChange(of: showToolbar) { _, v in
-                        Preferences.shared.hideTitleBar = !v
-                    }
+                Toggle("Show toolbar", isOn: showToolbar)
                 Text("Hiding it removes the title bar, window buttons, and drag area; switch tabs via the sidebar or ⌘ and the tab number.")
                     .settingsCaption()
 
                 Group {
-                    Picker(selection: $tabSwitcherVisibility) {
+                    Picker(selection: $preferences.tabSwitcherVisibility) {
                         ForEach(TabSwitcherVisibility.allCases) { option in
-                            Text(option.displayName).tag(option.rawValue)
+                            Text(option.displayName).tag(option)
                         }
                     } label: {
                         Text("Tab switcher").dimsWhenDisabled()
                     }
-                    .onChange(of: tabSwitcherVisibility) { _, v in
-                        Preferences.shared.tabSwitcherVisibility = TabSwitcherVisibility(rawValue: v) ?? .whenMultiple
-                    }
                     Text("Numbered control in the title bar for switching tabs by index.")
                         .settingsCaption()
 
-                    Picker(selection: $tabSwitcherPosition) {
+                    Picker(selection: $preferences.tabSwitcherPosition) {
                         ForEach(TabSwitcherPosition.allCases) { option in
-                            Text(option.displayName).tag(option.rawValue)
+                            Text(option.displayName).tag(option)
                         }
                     } label: {
                         Text("Tab switcher position").dimsWhenDisabled()
                     }
-                    .onChange(of: tabSwitcherPosition) { _, v in
-                        Preferences.shared.tabSwitcherPosition = TabSwitcherPosition(rawValue: v) ?? .trailing
-                    }
                     Text("Left places the switcher before the window title, next to the sidebar.")
                         .settingsCaption()
                 }
-                .disabled(!showToolbar || workspaceTabLayout == .horizontal)
+                .disabled(preferences.hideTitleBar || workspaceTabLayout == .horizontal)
             }
         }
         .formStyle(.grouped)
@@ -1329,6 +1424,80 @@ private struct AppearanceSettings: View {
     }
 }
 
+// MARK: - Animations
+
+/// Motion: what moves, and how. Smooth scrolling and split animations are on
+/// by default; the two cursor effects stay opt-in, since they change how the
+/// focused cursor is drawn.
+private struct AnimationsSettings: View {
+    @State
+    private var smoothScrolling: Bool = Preferences.shared.smoothScrolling
+    @State
+    private var snapScrollToRow: Bool = Preferences.shared.snapScrollToRow
+    @State
+    private var smoothCursor: Bool = Preferences.shared.smoothCursor
+    @State
+    private var cursorTrail: Bool = Preferences.shared.cursorTrail
+    @State
+    private var animatedSplits: Bool = Preferences.shared.animatedSplits
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Smooth scrolling", isOn: $smoothScrolling)
+                    .onChange(of: smoothScrolling) { _, v in
+                        Preferences.shared.smoothScrolling = v
+                    }
+
+                Group {
+                    Toggle(isOn: $snapScrollToRow) {
+                        Text("Snap to whole row").dimsWhenDisabled()
+                    }
+                    .onChange(of: snapScrollToRow) { _, v in
+                        Preferences.shared.snapScrollToRow = v
+                    }
+                    Text("When a scroll comes to rest, it settles onto the nearest row instead of stopping between rows.")
+                        .settingsCaption()
+                }
+                .disabled(!smoothScrolling)
+                .padding(.leading, 16)
+            } header: {
+                DocsSectionHeader("Scrolling", docs: .animations)
+            }
+
+            Section {
+                Toggle("Smooth cursor", isOn: $smoothCursor)
+                    .onChange(of: smoothCursor) { _, v in
+                        Preferences.shared.smoothCursor = v
+                    }
+                Text("The cursor glides between positions instead of jumping.")
+                    .settingsCaption()
+
+                Toggle("Cursor trail", isOn: $cursorTrail)
+                    .onChange(of: cursorTrail) { _, v in
+                        Preferences.shared.cursorTrail = v
+                    }
+                Text("A fading streak follows the cursor across larger moves.")
+                    .settingsCaption()
+            } header: {
+                DocsSectionHeader("Cursor", docs: .animations)
+            }
+
+            Section {
+                Toggle("Animate splits", isOn: $animatedSplits)
+                    .onChange(of: animatedSplits) { _, v in
+                        Preferences.shared.animatedSplits = v
+                    }
+                Text("Panes slide in and out as the layout changes.")
+                    .settingsCaption()
+            } header: {
+                DocsSectionHeader("Splits", docs: .animations)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
 // MARK: - Quick Terminal
 
 private struct QuickTerminalSettings: View {
@@ -1349,18 +1518,20 @@ private struct QuickTerminalSettings: View {
 
     var body: some View {
         Form {
-            Section("Quick Terminal") {
+            Section {
                 LabeledContent(
                     "Shortcut",
                     value: HotkeyRegistry.displayString(
                         for: HotkeyRegistry.selectedShortcutString(for: .toggleQuickTerminal)
                     )
                 )
-                Text("Works globally, even when Macterm isn't active. Rebind it in Keymaps, or clear it to disable the quick terminal.")
+                Text("Works even when Macterm isn't active.")
                     .settingsCaption()
+            } header: {
+                DocsSectionHeader("Quick Terminal", docs: .quickTerminal)
             }
 
-            Section("Position") {
+            Section {
                 Picker("Mode", selection: $positionMode) {
                     ForEach(QuickTerminalAdjustMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
@@ -1395,9 +1566,11 @@ private struct QuickTerminalSettings: View {
                     Preferences.shared.quickTerminalFixedY = 1 - v
                 }
                 .disabled(positionMode != .fixed)
+            } header: {
+                DocsSectionHeader("Position", docs: .quickTerminalGeometry)
             }
 
-            Section("Size") {
+            Section {
                 Picker("Mode", selection: $sizeMode) {
                     ForEach(QuickTerminalAdjustMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
@@ -1432,6 +1605,8 @@ private struct QuickTerminalSettings: View {
                     Preferences.shared.quickTerminalHeightFraction = v
                 }
                 .disabled(sizeMode != .fixed)
+            } header: {
+                DocsSectionHeader("Size", docs: .quickTerminalGeometry)
             }
         }
         .formStyle(.grouped)
@@ -1441,6 +1616,12 @@ private struct QuickTerminalSettings: View {
 // MARK: - Keymaps
 
 private struct KeymapSettings: View {
+    @Environment(AppState.self)
+    private var appState
+
+    /// Every binding's chord by row id: `HotkeyAction.id`s and the custom
+    /// palettes' `PaletteHotkeys.rowID`s together, so the conflict check
+    /// sees both tables.
     @State
     private var values: [String: String] = [:]
     @State
@@ -1449,6 +1630,8 @@ private struct KeymapSettings: View {
     private var global: [String: Bool] = [:]
     @State
     private var capturingActionID: String?
+    @State
+    private var query = ""
 
     /// Observed so a chord the system refuses to register shows its reason
     /// under the row the moment the toggle or the rebind lands.
@@ -1490,72 +1673,112 @@ private struct KeymapSettings: View {
     can see it, and it can no longer pass through to a program.
     """
 
-    /// Titles of the *other* actions that share `action`'s binding, for the
-    /// inline conflict message.
-    private func conflictPartners(for action: HotkeyAction) -> [String] {
-        guard let key = HotkeyRegistry.conflictKey(for: values[action.id] ?? "disabled") else {
+    /// Titles of the *other* bindings — actions and custom palettes — that
+    /// share the row `rowID`'s chord, for the inline conflict message.
+    private func conflictPartners(forRow rowID: String) -> [String] {
+        guard let key = HotkeyRegistry.conflictKey(for: values[rowID] ?? "disabled") else {
             return []
         }
-        return HotkeyAction.allCases
-            .filter { $0.id != action.id && HotkeyRegistry.conflictKey(for: values[$0.id] ?? "disabled") == key }
+        var partners = HotkeyAction.allCases
+            .filter { $0.id != rowID && HotkeyRegistry.conflictKey(for: values[$0.id] ?? "disabled") == key }
             .map(\.title)
+        partners += appState.customPalettes.entries
+            .filter { PaletteHotkeys.rowID(paletteID: $0.id) != rowID }
+            .filter { HotkeyRegistry.conflictKey(for: values[PaletteHotkeys.rowID(paletteID: $0.id)] ?? "disabled") == key }
+            .map(\.pill.title)
+        return partners
+    }
+
+    /// The custom palettes the search matches, listed under Palettes after
+    /// the built-in screens.
+    private var matchingCustomPalettes: [CustomPaletteStore.Entry] {
+        appState.customPalettes.entries.filter { entry in
+            let rowID = PaletteHotkeys.rowID(paletteID: entry.id)
+            let shortcut = values[rowID] ?? "disabled"
+            var fields = [entry.pill.title, AppCommand.Category.palettes.rawValue, HotkeyRegistry.displayString(for: shortcut)]
+            if !HotkeyRegistry.displaySymbols(for: shortcut).isEmpty { fields.append(shortcut) }
+            return Search.matches(query, in: fields)
+        }
     }
 
     /// Bindable actions grouped by the category of the `AppCommand` they back,
     /// so the keymaps list mirrors the command palette's sectioning instead of
-    /// being one long flat list. Categories appear in `AppCommand.allCases`
-    /// declaration order; actions keep their order within each.
+    /// being one long flat list. Categories and actions appear in
+    /// `AppCommand.allCases` declaration order (`HotkeyAction.inCommandOrder`),
+    /// the palette's own. While searching, only the matches (`Search.rank`
+    /// over `HotkeyAction.searchFields`), best first: a category comes in
+    /// where its best match ranks, and one left with none drops out.
     private var actionsByCategory: [(category: AppCommand.Category, actions: [HotkeyAction])] {
         var order: [AppCommand.Category] = []
         var grouped: [AppCommand.Category: [HotkeyAction]] = [:]
-        for action in HotkeyAction.allCases {
+        let matching = Search.rank(HotkeyAction.inCommandOrder, by: query) {
+            $0.searchFields(shortcut: values[$0.id] ?? $0.defaultShortcut)
+        }
+        for action in matching {
             let category = action.appCommand.category
             if grouped[category] == nil { order.append(category) }
             grouped[category, default: []].append(action)
         }
+        // A custom palette alone matching the search still needs its group.
+        if !matchingCustomPalettes.isEmpty, grouped[.palettes] == nil {
+            order.insert(.palettes, at: 0)
+            grouped[.palettes] = []
+        }
         return order.map { ($0, grouped[$0] ?? []) }
     }
 
+    private var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
         Form {
-            Section("Passthrough Programs") {
-                TextField(
-                    "Programs",
-                    text: Binding(
-                        get: { Preferences.shared.passthroughPrograms },
-                        set: { Preferences.shared.passthroughPrograms = $0 }
-                    ),
-                    prompt: Text(verbatim: "nvim, hx")
-                )
-                Text(
-                    "Keybinds with Pass to TUI checked below yield to these programs instead "
-                        + "of running their action. Match the name shown in the tab title; separate with commas."
-                )
-                .settingsCaption()
-            }
+            passthroughSection
 
-            ForEach(actionsByCategory, id: \.category) { group in
-                Section(group.category.rawValue) {
+            // One block: the search at its top, then every category as a
+            // run of rows under its own column header, so the list reads as
+            // a single table divided rather than as separate tables.
+            Section {
+                SettingsSearchField(text: $query, prompt: "Search by action or keybind")
+                if isSearching, actionsByCategory.isEmpty {
+                    Text("No keybinds match “\(query.trimmingCharacters(in: .whitespaces))”.")
+                        .foregroundStyle(.secondary)
+                }
+                if !actionsByCategory.isEmpty {
                     columnHeader
+                }
+                ForEach(actionsByCategory, id: \.category) { group in
+                    sectionLabel(group.category.rawValue)
                     ForEach(group.actions) { action in
                         hotkeyRow(action)
                     }
+                    if group.category == .palettes {
+                        ForEach(matchingCustomPalettes) { entry in
+                            customPaletteRow(entry)
+                        }
+                    }
                 }
+            } header: {
+                Text("Keybinds")
             }
         }
         .formStyle(.grouped)
         .background(
-            HotkeyCaptureView(capturingActionID: $capturingActionID) { event, actionID in
-                guard let action = HotkeyAction(rawValue: actionID),
-                      let shortcut = HotkeyRegistry.shortcutString(from: event)
-                else { return }
-                values[action.id] = shortcut
-                HotkeyRegistry.setShortcutString(shortcut, for: action)
+            HotkeyCaptureView(capturingActionID: $capturingActionID) { event, rowID in
+                guard let shortcut = HotkeyRegistry.shortcutString(from: event) else { return }
+                if let action = HotkeyAction(rawValue: rowID) {
+                    values[action.id] = shortcut
+                    HotkeyRegistry.setShortcutString(shortcut, for: action)
+                } else if let paletteID = PaletteHotkeys.paletteID(fromRowID: rowID) {
+                    values[rowID] = shortcut
+                    PaletteHotkeys.shared.setShortcutString(shortcut, paletteID: paletteID)
+                } else {
+                    return
+                }
                 capturingActionID = nil
                 HotkeyCaptureState.shared.isCapturing = false
             }
         )
         .onAppear {
+            appState.customPalettes.reloadIfChanged()
             var map: [String: String] = [:]
             var flags: [String: Bool] = [:]
             var globals: [String: Bool] = [:]
@@ -1564,7 +1787,12 @@ private struct KeymapSettings: View {
                 flags[action.id] = HotkeyRegistry.passesThroughToPrograms(for: action)
                 globals[action.id] = HotkeyRegistry.isGlobal(action)
             }
-            values = map
+            for paletteID in PaletteHotkeys.shared.paletteIDs {
+                let rowID = PaletteHotkeys.rowID(paletteID: paletteID)
+                flags[rowID] = PaletteHotkeys.shared.passesThrough(paletteID: paletteID)
+                globals[rowID] = PaletteHotkeys.shared.isGlobal(paletteID: paletteID)
+            }
+            values = map.merging(PaletteHotkeys.shared.shortcutStringsByRowID()) { _, palette in palette }
             passthrough = flags
             global = globals
         }
@@ -1574,9 +1802,37 @@ private struct KeymapSettings: View {
         }
     }
 
-    /// Names the three columns once per section. Repeated per section rather
-    /// than once per pane because each section scrolls independently in a long
-    /// list, and a header that has scrolled away explains nothing.
+    private var passthroughSection: some View {
+        Section {
+            TextField(
+                "Programs",
+                text: Binding(
+                    get: { Preferences.shared.passthroughPrograms },
+                    set: { Preferences.shared.passthroughPrograms = $0 }
+                ),
+                prompt: Text(verbatim: "nvim, hx")
+            )
+            Text(
+                "Keybinds with Pass to TUI checked go to these programs instead of running their action. "
+                    + "Separate names with commas."
+            )
+            .settingsCaption()
+        } header: {
+            DocsSectionHeader("Passthrough Programs", docs: .keybinds)
+        }
+    }
+
+    /// A category's divider inside the block: its name alone, small and
+    /// gray, where the rows' titles go.
+    private func sectionLabel(_ category: String) -> some View {
+        Text(category)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The one header row of the table, under the search: the three column
+    /// names over the boxes every row lines its controls up in.
     private var columnHeader: some View {
         HStack(spacing: Self.columnGap) {
             Text("Action")
@@ -1616,9 +1872,101 @@ private struct KeymapSettings: View {
         )
     }
 
+    private func palettePassthroughBinding(_ paletteID: String) -> Binding<Bool> {
+        let rowID = PaletteHotkeys.rowID(paletteID: paletteID)
+        return Binding(
+            get: { passthrough[rowID] ?? false },
+            set: { enabled in
+                passthrough[rowID] = enabled
+                PaletteHotkeys.shared.setPassesThrough(enabled, paletteID: paletteID)
+            }
+        )
+    }
+
+    private func paletteGlobalBinding(_ paletteID: String) -> Binding<Bool> {
+        let rowID = PaletteHotkeys.rowID(paletteID: paletteID)
+        return Binding(
+            get: { global[rowID] ?? false },
+            set: { enabled in
+                global[rowID] = enabled
+                PaletteHotkeys.shared.setGlobal(enabled, paletteID: paletteID)
+            }
+        )
+    }
+
+    /// A custom palette's row: the same five children as `hotkeyRow`, its
+    /// flags kept by `PaletteHotkeys`, so its columns line up with the header
+    /// and every action row.
+    @ViewBuilder
+    private func customPaletteRow(_ entry: CustomPaletteStore.Entry) -> some View {
+        let rowID = PaletteHotkeys.rowID(paletteID: entry.id)
+        let partners = conflictPartners(forRow: rowID)
+        let isCapturing = capturingActionID == rowID
+        let isUnmapped = HotkeyRegistry.displaySymbols(for: values[rowID] ?? "disabled").isEmpty
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: Self.columnGap) {
+                Text(entry.pill.title)
+                Spacer(minLength: 0)
+                Toggle("", isOn: paletteGlobalBinding(entry.id))
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                    .frame(width: Self.globalColumn, alignment: .center)
+                    .help(Self.globalHelp)
+                Toggle("", isOn: palettePassthroughBinding(entry.id))
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                    .frame(width: Self.passthroughColumn, alignment: .center)
+                    .help(Self.passthroughHelp)
+                Button {
+                    HotkeyCaptureState.shared.isCapturing = true
+                    capturingActionID = rowID
+                } label: {
+                    Text(isCapturing ? "Press keys..." : HotkeyRegistry.displayString(for: values[rowID] ?? "disabled"))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle((isUnmapped && !isCapturing) ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+                .frame(width: Self.keybindColumn)
+                HStack(spacing: 0) {
+                    Button {
+                        values[rowID] = "disabled"
+                        PaletteHotkeys.shared.clearShortcut(paletteID: entry.id)
+                        if capturingActionID == rowID {
+                            capturingActionID = nil
+                            HotkeyCaptureState.shared.isCapturing = false
+                        }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .disabled(isUnmapped)
+                    .help("Clear this keybind")
+                    .frame(width: Self.clearColumn)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(MactermTheme.warning)
+                        .opacity(partners.isEmpty ? 0 : 1)
+                        .frame(width: Self.warningColumn)
+                }
+                .frame(width: Self.trailingColumn)
+            }
+            if !partners.isEmpty {
+                Text("Conflicts with \(partners.joined(separator: ", "))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(MactermTheme.warning)
+            }
+            if let refusal = globalHotkeys.refusals[.palette(entry.id)] {
+                Text(refusal.message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(MactermTheme.warning)
+            }
+        }
+    }
+
     @ViewBuilder
     private func hotkeyRow(_ action: HotkeyAction) -> some View {
-        let partners = conflictPartners(for: action)
+        let partners = conflictPartners(forRow: action.id)
         let isCapturing = capturingActionID == action.id
         let isUnmapped = HotkeyRegistry.displaySymbols(for: values[action.id] ?? "disabled").isEmpty
         VStack(alignment: .leading, spacing: 4) {
@@ -1703,7 +2051,7 @@ private struct KeymapSettings: View {
             // than left silent: the binding still works inside Macterm, so
             // nothing looks broken until the user tries it from another app —
             // where the keystroke never reaches us at all.
-            if let refusal = globalHotkeys.refusals[action] {
+            if let refusal = globalHotkeys.refusals[.action(action)] {
                 Text(refusal.message)
                     .font(.system(size: 11))
                     .foregroundStyle(MactermTheme.warning)
@@ -1770,62 +2118,6 @@ private struct HotkeyCaptureView: NSViewRepresentable {
 
 // MARK: - Updates
 
-/// Features that work but haven't earned a permanent home yet: each is off
-/// by default, does nothing to a user who never opens this pane, and is
-/// expected to either graduate into a regular pane or be removed. Keep the
-/// pane honest — a toggle that has shipped for a while without complaint
-/// belongs elsewhere.
-private struct ExperimentalSettings: View {
-    @State
-    private var smoothScrolling: Bool = Preferences.shared.smoothScrolling
-    @State
-    private var smoothCursor: Bool = Preferences.shared.smoothCursor
-    @State
-    private var cursorTrail: Bool = Preferences.shared.cursorTrail
-    @State
-    private var animatedSplits: Bool = Preferences.shared.animatedSplits
-
-    var body: some View {
-        Form {
-            Section("Scrolling") {
-                Toggle("Smooth scrolling", isOn: $smoothScrolling)
-                    .onChange(of: smoothScrolling) { _, v in
-                        Preferences.shared.smoothScrolling = v
-                    }
-                Text(
-                    "Trackpad scrolling moves scrollback by pixels instead of whole rows. "
-                        + "Programs that draw their own screen (editors, pagers) still scroll by rows."
-                )
-                .settingsCaption()
-            }
-
-            Section("Cursor") {
-                Toggle("Smooth cursor", isOn: $smoothCursor)
-                    .onChange(of: smoothCursor) { _, v in
-                        Preferences.shared.smoothCursor = v
-                    }
-                Text("The cursor glides between positions instead of jumping.")
-                    .settingsCaption()
-
-                Toggle("Cursor trail", isOn: $cursorTrail)
-                    .onChange(of: cursorTrail) { _, v in
-                        Preferences.shared.cursorTrail = v
-                    }
-                Text("A fading streak follows the cursor across larger moves.")
-                    .settingsCaption()
-            }
-
-            Section("Splits") {
-                Toggle("Animate splits", isOn: $animatedSplits)
-                    .onChange(of: animatedSplits) { _, v in
-                        Preferences.shared.animatedSplits = v
-                    }
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
 private struct UpdatesSettings: View {
     /// `Updater` is `@Observable`; read the singleton directly (Observation
     /// tracks `canCheckForUpdates`/`updateAvailable` reads in `body`).
@@ -1868,7 +2160,7 @@ private struct UpdatesSettings: View {
             // Deliberately its own section, and NOT disabled when automatic
             // checks are off: the channel governs which updates are visible to
             // any check, including a manual "Check for Updates Now".
-            Section("Channel") {
+            Section {
                 Picker("Update channel", selection: $updateChannel) {
                     ForEach(UpdateChannel.allCases) { option in
                         Text(option.displayName).tag(option.rawValue)
@@ -1880,6 +2172,8 @@ private struct UpdatesSettings: View {
 
                 Text("Tip builds come from every commit that passes CI and are not release-tested.")
                     .settingsCaption()
+            } header: {
+                Text("Channel")
             }
 
             Section("Version") {

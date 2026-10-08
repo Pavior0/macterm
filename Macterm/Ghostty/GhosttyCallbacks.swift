@@ -62,13 +62,16 @@ final class GhosttyCallbacks: @unchecked Sendable {
             guard let view = surfaceView(from: target) else { return true }
             let exitCode = action.action.command_finished.exit_code
             let duration = action.action.command_finished.duration
-            DispatchQueue.main.async { view.onCommandFinished?(exitCode, duration) }
+            DispatchQueue.main.async {
+                PasswordPromptMonitor.shared.viewDidFinishCommand(view, exitCode: Int32(exitCode))
+                view.onCommandFinished?(exitCode, duration)
+            }
             return true
         case GHOSTTY_ACTION_PROGRESS_REPORT:
+            // OSC 9;4. Only the state is read — the percentage is never shown.
             guard let view = surfaceView(from: target) else { return true }
-            let state = action.action.progress_report.state
-            let running = state == GHOSTTY_PROGRESS_STATE_SET || state == GHOSTTY_PROGRESS_STATE_INDETERMINATE
-            DispatchQueue.main.async { view.surfaceDidReportProgress(running: running) }
+            let report = Self.progressReport(for: action.action.progress_report.state)
+            DispatchQueue.main.async { view.surfaceDidReportProgress(report) }
             return true
         case GHOSTTY_ACTION_SCROLLBAR:
             guard let view = surfaceView(from: target) else { return true }
@@ -168,6 +171,13 @@ final class GhosttyCallbacks: @unchecked Sendable {
             // Ghostty.app. The url bytes are NOT null-terminated (`len`
             // bounds them) and the pointer is owned by libghostty for this
             // call only, so copy synchronously.
+            //
+            // An OSC 8 hyperlink's target is chosen by whatever program wrote
+            // it, so that kind never reaches `NSWorkspace` unexamined:
+            // `UntrustedURL` opens web and mail links, confirms a custom
+            // scheme and refuses anything malformed, deceptive or executable
+            // (`UntrustedURLAlert`). Every kind still answers true — false
+            // makes libghostty retry with its own unrestricted opener.
             let payload = action.action.open_url
             guard let ptr = payload.url, payload.len > 0 else { return true }
             let urlString = String(
@@ -175,7 +185,16 @@ final class GhosttyCallbacks: @unchecked Sendable {
                 as: UTF8.self
             )
             let kind = payload.kind
-            DispatchQueue.main.async { Self.openURL(urlString, kind: kind) }
+            // A link clicked in the grid (kind `.unknown`, the regex's) goes
+            // to the pane first: a file path — `src/app.ts:42` included,
+            // which no opener understands — is resolved against the pane's
+            // cwd there. OSC 8 targets and keybind opens skip it; an OSC 8
+            // target's alert sheets on the clicked pane's window.
+            let view = surfaceView(from: target)
+            DispatchQueue.main.async {
+                if kind == GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN, view?.onOpenLink?(urlString) == true { return }
+                Self.openURL(urlString, kind: kind, from: view?.window)
+            }
             return true
         case GHOSTTY_ACTION_MOUSE_SHAPE:
             // The pointer shape for the current mouse position — I-beam over
@@ -291,6 +310,20 @@ final class GhosttyCallbacks: @unchecked Sendable {
             let title = action.action.set_tab_title.title.flatMap { String(cString: $0) } ?? ""
             DispatchQueue.main.async { view.onSetTabTitle?(title.isEmpty ? nil : title) }
             return true
+        case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
+            // `toggle_fullscreen` — ⌃⌘F and ⌘↩ in ghostty's defaults — takes
+            // the pane's own window full screen, as in Ghostty.app. Always
+            // native: the same `toggleFullScreen(_:)` as AppKit's Enter Full
+            // Screen item (fn+F), so `macos-non-native-fullscreen` is not
+            // honored. The quick terminal's panel can't go native full screen
+            // (Ghostty.app uses its non-native mode there) and the incubator
+            // is never on screen, so both decline.
+            guard let view = surfaceView(from: target) else { return false }
+            DispatchQueue.main.async {
+                guard let window = view.window, AppDelegate.isTerminalWindowCandidate(window) else { return }
+                window.toggleFullScreen(nil)
+            }
+            return true
         case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
             // Log-only, and deliberately `return false` so the core still
             // renders its own message / abnormal-exit overlay — the error UI
@@ -317,7 +350,7 @@ final class GhosttyCallbacks: @unchecked Sendable {
             return true
         default:
             // Deliberately unhandled: window/tab/split management actions
-            // (NEW_TAB, NEW_SPLIT, GOTO_*, TOGGLE_FULLSCREEN, QUIT, …) —
+            // (NEW_TAB, NEW_SPLIT, GOTO_*, QUIT, …) —
             // those concepts are Macterm-owned via AppCommand/hotkeys, not
             // ghostty keybinds; GTK/iOS-only actions (SHOW_GTK_INSPECTOR,
             // SHOW_ON_SCREEN_KEYBOARD); the imgui INSPECTOR; sizing hints
@@ -332,6 +365,19 @@ final class GhosttyCallbacks: @unchecked Sendable {
             // purpose: returning false makes the core render its own
             // abnormal-exit overlay, which is the error UI Macterm relies on.
             return false
+        }
+    }
+
+    /// What an OSC 9;4 state says about the pane's run. SET and INDETERMINATE
+    /// are work under way, ERROR ends the run as a failure, and REMOVE and
+    /// PAUSE end it as they always have. A state this build doesn't know ends
+    /// the run too, the reading that can't leave a spinner up. Pure, for tests.
+    static func progressReport(for state: ghostty_action_progress_report_state_e) -> TerminalProgressReport {
+        switch state {
+        case GHOSTTY_PROGRESS_STATE_SET,
+             GHOSTTY_PROGRESS_STATE_INDETERMINATE: .running
+        case GHOSTTY_PROGRESS_STATE_ERROR: .failed
+        default: .ended
         }
     }
 
@@ -401,7 +447,13 @@ final class GhosttyCallbacks: @unchecked Sendable {
         return URL(fileURLWithPath: (string as NSString).standardizingPath)
     }
 
-    private static func openURL(_ string: String, kind: ghostty_action_open_url_kind_e) {
+    /// `window` is the clicked pane's, where an untrusted link's alert sheets.
+    @MainActor
+    private static func openURL(_ string: String, kind: ghostty_action_open_url_kind_e, from window: NSWindow? = nil) {
+        if kind == GHOSTTY_ACTION_OPEN_URL_KIND_OSC8 {
+            openUntrustedURL(string, from: window)
+            return
+        }
         let url = resolvedOpenTarget(string)
         // `.text` asks for the payload to be *viewed as text* (scrollback
         // dumps land here): prefer the default app for the file's extension,
@@ -412,6 +464,23 @@ final class GhosttyCallbacks: @unchecked Sendable {
             return
         }
         NSWorkspace.shared.open(url)
+    }
+
+    /// An OSC 8 target, through `UntrustedURL`'s policy. Deliberately not
+    /// `resolvedOpenTarget`: a schemeless string is refused, not read as a path.
+    @MainActor
+    private static func openUntrustedURL(_ string: String, from window: NSWindow?) {
+        let target = UntrustedURL(string)
+        switch target.decision {
+        case let .allow(url):
+            NSWorkspace.shared.open(url)
+        case let .confirm(url):
+            logger.info("OSC 8 link needs confirmation: \(target.displayString, privacy: .public)")
+            UntrustedURLAlert.presentConfirmation(for: url, displayString: target.displayString, in: window)
+        case let .deny(reason):
+            logger.notice("OSC 8 link blocked (\(String(describing: reason), privacy: .public)): \(target.displayString, privacy: .public)")
+            UntrustedURLAlert.presentBlock(reason: reason, displayString: target.displayString, in: window)
+        }
     }
 
     private static func defaultTextEditor(for url: URL) -> URL? {

@@ -177,6 +177,10 @@ final class AppState {
         first.activeProjectID = saved[0].activeProjectID ?? first.activeProjectID
         if let width = saved[0].sidebarWidth { first.sidebarWidth = width }
         if let visible = saved[0].sidebarVisible { first.sidebarVisible = visible }
+        if let frame = saved[0].frame {
+            first.frame = frame
+            applyRestoredFrame(of: first)
+        }
         recordRestoredTab(saved[0].activeTabID, in: first)
         if keyWindowID == first.id {
             activeProjectID = first.activeProjectID
@@ -367,6 +371,7 @@ final class AppState {
             }
             if let width = restoring.sidebarWidth { window.sidebarWidth = width }
             if let visible = restoring.sidebarVisible { window.sidebarVisible = visible }
+            if let frame = restoring.frame { window.frame = frame }
         } else if hasRestoredWindows {
             // A window the user opened, not one being restored: the sidebar
             // comes up at the app's defaults — shown, at the default width.
@@ -380,10 +385,36 @@ final class AppState {
         // A new window opens on whatever the user was last looking at, which
         // is both the useful default and what a single-window build did.
         if window.activeProjectID == nil { window.activeProjectID = activeProjectID }
+        // A restored window, or the scene's own window when `restoreWindows`
+        // handed it the first saved entry before it attached.
+        applyRestoredFrame(of: window)
         windows.append(window)
         reconcileWindowViews()
         logger.debug("registerWindow: \(window.id, privacy: .public) count=\(self.windows.count)")
         frontRestoredKeyWindowIfNeeded()
+        persistWindows()
+    }
+
+    /// Put a restored window at the frame it was saved with. A no-op until
+    /// the window has attached (and so always under tests); both callers run
+    /// again once it has — `registerWindow` is called at attachment, and
+    /// `restoreWindows` for a window that attached first.
+    private func applyRestoredFrame(of window: WindowState) {
+        guard let frame = window.frame, let nsWindow = nsWindow(for: window) else { return }
+        WindowAppearance.restoreFrame(frame, window: nsWindow)
+    }
+
+    /// A terminal window moved or resized: record the frame the next launch
+    /// reopens it at. Full screen is skipped, so the windowed frame survives
+    /// a quit made while full screen (macOS restores no full-screen state
+    /// here, and a screen-sized frame is not one the user chose).
+    func windowFrameDidChange(_ nsWindow: NSWindow) {
+        guard !nsWindow.styleMask.contains(.fullScreen),
+              let window = windowStatesByNSWindow.object(forKey: nsWindow)
+        else { return }
+        let frame = nsWindow.frameDescriptor
+        guard window.frame != frame else { return }
+        window.frame = frame
         persistWindows()
     }
 
@@ -794,6 +825,47 @@ final class AppState {
         set { keyOrFirstWindow?.isHorizontalProjectSwitcherPresented = newValue }
     }
 
+    /// Show the palette on `scope` alone (nil: the root), whatever stack of
+    /// screens was up. A different screen starts from an empty query — text
+    /// typed for one search means nothing to another.
+    func openCommandPalette(scope: PaletteScopeID?) {
+        guard let window = keyOrFirstWindow else { return }
+        if window.paletteScope != scope || window.paletteStack.count > 1 {
+            commandPaletteQuery = ""
+            window.showPaletteScope(scope)
+        }
+        window.isCommandPaletteVisible = true
+    }
+
+    /// A custom palette's chord (`PaletteHotkeys`): toggles the palette on
+    /// its root like a built-in screen's chord, says so for a palette turned
+    /// off in Settings → Palettes or whose file no longer reads.
+    func openCustomPalette(id: String) {
+        customPalettes.reloadIfChanged()
+        guard let entry = customPalettes.entry(id: id) else { return }
+        guard Preferences.shared.isPaletteEnabled(entry.settingsID) else {
+            presentToast("\(entry.pill.title) is turned off in Settings → Palettes")
+            return
+        }
+        guard let target = customPalettes.rootTarget(id: id) else { return }
+        toggleCommandPalette(scope: .custom(target))
+    }
+
+    /// A screen's own chord: shows the palette on `scope`, or closes it when
+    /// that screen is already up — what ⌘P is to the root.
+    func toggleCommandPalette(scope: PaletteScopeID) {
+        if isCommandPaletteVisible, keyOrFirstWindow?.paletteScope == scope {
+            isCommandPaletteVisible = false
+        } else {
+            openCommandPalette(scope: scope)
+        }
+    }
+
+    /// Presents the password editor sheet in the window the user is in.
+    func presentPasswordEditor(_ request: PasswordEditorRequest) {
+        keyOrFirstWindow?.passwordEditor = request
+    }
+
     /// Presents the "New Remote Project" sheet (#104) — set by the palette
     /// command, the sidebar's New Project menu and Settings → Projects,
     /// consumed by `MainWindow`.
@@ -901,11 +973,11 @@ final class AppState {
     /// surfaces (and thus never spawn shells) inside the test host.
     @ObservationIgnored
     var warmPane: (Pane) -> Void = { SurfaceIncubator.shared.warm($0) }
-    var pendingClosePane: PendingClosePane?
-    /// A computed layout-apply plan awaiting user confirmation because applying
-    /// it would terminate one or more live panes/tabs. nil when no apply is
-    /// pending (or the pending apply is non-destructive and already ran).
-    var pendingLayoutApply: PendingLayoutApply?
+    /// The one dialog awaiting the user — a staged confirmation or a notice.
+    /// Set through `present`, cleared through `confirmPendingDialog` /
+    /// `dismissPendingDialog` (see `AppState+Dialogs`); presented by the one
+    /// `PendingDialogAlert` per scene.
+    var pendingDialog: PendingDialog?
     /// The command palette's search text, kept on `AppState` so it survives the
     /// panel's view lifecycle — closing and reopening the palette preserves what
     /// was typed.
@@ -920,81 +992,6 @@ final class AppState {
     private var projectRecency = RecencyStack<UUID>(limit: 50)
     private let recencyKey = "macterm.projectRecency"
 
-    /// Which window presents a dialog `AppState` stages.
-    ///
-    /// Both scenes in `MactermApp` — the main `WindowGroup` and `Settings` —
-    /// attach alerts to the *same* pending state, because Settings → Projects
-    /// drives the same destructive project/layout mutations and the settings
-    /// window needs its own copy of each confirmation. With no gate, one
-    /// request presents twice: SwiftUI materializes and fronts the settings
-    /// window purely to show its duplicate, stacking an identical dialog on
-    /// top of the one the user is looking at. So every staged dialog records
-    /// the scene that asked for it, and each scene's `isPresented` binding
-    /// reads only its own. The default is the main window; only the settings
-    /// pane's call sites pass `.settings`.
-    enum DialogHost: Equatable {
-        case mainWindow
-        case settings
-    }
-
-    struct PendingClosePane: Equatable {
-        let paneID: UUID
-        let projectID: UUID
-    }
-
-    /// A tab close staged for confirmation because one of its panes has a
-    /// running foreground program (closing kills the pane's zmx session — the
-    /// destructive act now that quit detaches).
-    struct PendingCloseTab: Equatable {
-        let tabID: UUID
-        let projectID: UUID
-    }
-
-    var pendingCloseTab: PendingCloseTab?
-
-    /// A project removal staged for confirmation, same busy rule as tabs.
-    /// Carries the full removal (AppState workspace + ProjectStore entry) as
-    /// a closure, since the store lives with the caller.
-    struct PendingRemoveProject {
-        let projectID: UUID
-        let completeRemoval: () -> Void
-        var host: DialogHost = .mainWindow
-    }
-
-    var pendingRemoveProject: PendingRemoveProject?
-
-    /// A reconcile plan staged for confirmation because applying it would
-    /// close panes / end their processes. (There's no name-mismatch prompt
-    /// anymore: central project files are matched by *path*, so a differing
-    /// `name:` only means the project was renamed since the last save —
-    /// expected drift, not a wrong-file hazard.)
-    struct PendingLayoutApply {
-        let projectID: UUID
-        let plan: LayoutReconciler.Plan
-        var host: DialogHost = .mainWindow
-
-        var confirmationMessage: String {
-            "Applying this layout will close some panes and end the processes running in them."
-        }
-    }
-
-    /// A layout apply/save/import notice awaiting presentation (alert in
-    /// `MactermApp`). Fed by the explicit palette/menu/Settings commands — an
-    /// invalid project file must always surface a dialog, never fail silently.
-    struct LayoutError: Identifiable {
-        let id = UUID()
-        /// "apply" / "save" / "import" — slotted into the default alert title.
-        let verb: String
-        let message: String
-        /// Title override for notices that aren't failures (e.g. a save that
-        /// landed but is shadowed by a duplicate file).
-        var customTitle: String?
-        var host: DialogHost = .mainWindow
-        var title: String { customTitle ?? "Couldn't \(verb) layout" }
-    }
-
-    var pendingLayoutError: LayoutError?
-
     /// Bumped whenever the app itself writes a project file, so an open
     /// Projects settings pane can re-read the directory. There's no file
     /// watcher by design (hand-edits surface on next use); this covers only
@@ -1005,9 +1002,10 @@ final class AppState {
         layoutFilesVersion &+= 1
     }
 
-    /// The transient success confirmation showing in `ToastOverlay`, if any.
-    /// Only for outcomes that leave no visible trace — failures still raise a
-    /// dialog, which a toast must never replace.
+    /// The transient confirmation showing in `ToastOverlay`, if any. Only for
+    /// outcomes that leave no visible trace — a success, or a keybind that
+    /// had nothing to act on (`AppCommand.unavailableNotice`) — failures
+    /// still raise a dialog, which a toast must never replace.
     private(set) var activeToast: Toast?
 
     /// Show `toast`, replacing any toast already up (the newest outcome is the
@@ -1157,6 +1155,15 @@ final class AppState {
     var newTabInheritsWorkingDirectory: () -> Bool = { GhosttyApp.shared.tabInheritsWorkingDirectory }
     @ObservationIgnored
     var newSplitInheritsWorkingDirectory: () -> Bool = { GhosttyApp.shared.splitInheritsWorkingDirectory }
+    /// Settings → General → Text Files, read when a file opens. Injectable
+    /// so tests drive both placements without touching shared preferences.
+    @ObservationIgnored
+    var textFilePlacement: () -> TextFilePlacement = { Preferences.shared.textFilePlacement }
+
+    /// Whether Launch Services opens a clicked file with this app — the one
+    /// case a click keeps its line. Injectable for the same reason.
+    @ObservationIgnored
+    var opensTextFileHere: (URL) -> Bool = { TextFileOpening.isDefaultApp(for: $0) }
     @ObservationIgnored
     var dockBadgeWriter: (String?) -> Void = { BellBadge.apply($0) }
     /// The label last handed to `dockBadgeWriter`, so a sync that changes
@@ -1185,6 +1192,70 @@ final class AppState {
     /// into the shared one. See `AppState+QuickTerminal.swift`.
     @ObservationIgnored
     var adoptedQuickTerminal: QuickTerminalSplitState?
+
+    /// Terminals on the desktop, in creation order. See
+    /// `AppState+DesktopWidgets.swift`.
+    var desktopWidgets: [DesktopWidget] = []
+
+    /// The one desktop widget unlocked for editing, if any. In memory only:
+    /// every widget launches locked.
+    var editingDesktopWidgetID: UUID?
+
+    /// The windows that draw `desktopWidgets`; nil under tests, which assert
+    /// on the model alone.
+    @ObservationIgnored
+    weak var desktopWidgetPresenter: (any DesktopWidgetPresenting)?
+
+    /// The screens widgets may sit on, the primary display (the one with
+    /// the menu bar, `NSScreen.screens[0]`) first — where new widgets go and
+    /// what `widgets.yaml` means by no `display:`. Injectable so placement
+    /// tests don't depend on the machine's displays.
+    @ObservationIgnored
+    var desktopScreens: () -> [DesktopScreen] = {
+        NSScreen.screens.map {
+            DesktopScreen(name: $0.localizedName, visibleFrame: $0.visibleFrame, resolution: $0.frame.size)
+        }
+    }
+
+    /// Where the system's own desktop widgets are, so ours line up with and
+    /// never cover them (`NativeDesktopWidgets`). Injectable: tests must not
+    /// see the machine's real widgets.
+    @ObservationIgnored
+    var nativeDesktopWidgetFrames: () -> [CGRect] = { NativeDesktopWidgets.frames() }
+
+    /// `~/.config/macterm/widgets.yaml` (`AppState+DesktopWidgets`).
+    @ObservationIgnored
+    let widgetLayoutStore: WidgetLayoutStore
+    /// The custom palettes (`~/.config/macterm/palettes/*.yaml`), re-read
+    /// when the palette opens.
+    let customPalettes: CustomPaletteStore
+
+    /// The exact text of our last `widgets.yaml` write — anything else on
+    /// disk is an edit to absorb before the next write.
+    @ObservationIgnored
+    var widgetLayoutLastWrittenText: String?
+
+    /// Auto-writes paused because `widgets.yaml` doesn't parse.
+    @ObservationIgnored
+    var widgetLayoutSuspended = false
+
+    /// The widgets our last `widgets.yaml` write listed — the only ones an
+    /// entry can have been removed FROM. A widget created since that write
+    /// is unknown to the file on disk, not removed by the user.
+    @ObservationIgnored
+    var widgetLayoutLastWrittenIDs: Set<UUID> = []
+
+    /// Widgets whose `widgets.yaml` entry the user removed while Macterm ran:
+    /// still alive — a half-saved file must never kill a shell — but left out
+    /// of every write, so the next launch removes them as the file says.
+    @ObservationIgnored
+    var unlistedDesktopWidgetIDs: Set<UUID> = []
+
+    /// Restored widgets not drawn yet: they wait for zmx to say whether their
+    /// sessions survived, so a dead one respawns from its recipe instead of
+    /// a surface reattaching to an empty shell first.
+    @ObservationIgnored
+    var pendingDesktopWidgetMaterialize: Set<UUID> = []
 
     /// Refresh policy for `ZmxForegroundResolver`'s name→leader-pid cache:
     /// refresh on session lifecycle events plus a 30s reconcile TTL — never
@@ -1224,7 +1295,12 @@ final class AppState {
     ) {
         self.workspaceStore = workspaceStore
         self.projectFiles = projectFiles
-        pinnedLayoutStore = PinnedLayoutStore(directoryURL: projectFiles.directoryURL)
+        pinnedLayoutStore = PinnedLayoutStore(
+            directoryURL: projectFiles.configDirectoryURL,
+            legacyDirectoryURL: projectFiles.directoryURL
+        )
+        widgetLayoutStore = WidgetLayoutStore(directoryURL: projectFiles.configDirectoryURL)
+        customPalettes = CustomPaletteStore(configDirectoryURL: projectFiles.configDirectoryURL)
         if let quickTerminal { adoptQuickTerminal(quickTerminal) }
         let autoTileToken = NotificationCenter.default.addObserver(
             forName: .autoTilingEnabledDidChange,
@@ -1436,8 +1512,11 @@ final class AppState {
                         // remote probe below. A pane holding a boundary
                         // request rides along from ANY project — a command
                         // finishing in a background project must still
-                        // rename its tab without waiting for a switch.
-                        if projectID == activeProjectID || pane.remoteProbePending {
+                        // rename its tab without waiting for a switch — and
+                        // so does a title waiting on a probe to confirm it.
+                        if projectID == activeProjectID || pane.remoteProbePending
+                            || pane.awaitsRemoteTitleConfirmation
+                        {
                             activeRemotePanes.append(pane)
                         }
                     } else {
@@ -1473,7 +1552,7 @@ final class AppState {
         // of waiting for an interaction.
         let panesToProbe = isAnyWindowVisible()
             ? activeRemotePanes
-            : activeRemotePanes.filter(\.remoteProbePending)
+            : activeRemotePanes.filter { $0.remoteProbePending || $0.awaitsRemoteTitleConfirmation }
         // The background-connections toggle gates ALL probe kinds — scheduled,
         // boundary, and priming requests alike — because each is a fresh ssh
         // connection, and one connection is one Touch ID dialog on a
@@ -1481,6 +1560,11 @@ final class AppState {
         // so the check lives here rather than inside the resolver.
         if !panesToProbe.isEmpty, Preferences.shared.backgroundSSHConnections {
             remoteForegroundResolver.refresh(panes: panesToProbe, probe: zmx.remoteForegrounds)
+        } else {
+            // Turned off with a title still waiting on a probe: none is coming.
+            for pane in panesToProbe {
+                pane.abandonRemoteTitleConfirmation()
+            }
         }
     }
 
@@ -1532,6 +1616,11 @@ final class AppState {
         // The quick terminal's tab reattaches like any workspace tab. Before
         // the orphan sweep below, which spares only what a pane claims.
         restoreQuickTerminal(loaded.quickTerminal)
+        // Widgets too: their sessions must be claimed before the sweep, and
+        // `widgets.yaml` decides which exist before either.
+        let restoredWidgets = restoreDesktopWidgets(loaded.desktopWidgets)
+        reconcileWidgetLayoutAtLaunch()
+        Task { await materializeRestoredDesktopWidgets(restoredWidgets) }
         if let id = Preferences.shared.activeProjectID {
             if id == PinnedTabs.projectID {
                 if !pinnedRecords.isEmpty {
@@ -1603,10 +1692,12 @@ final class AppState {
                         sidebarWidth: window.sidebarWidth,
                         isKey: window.id == keyWindowID,
                         activeTabID: window.activeProjectID.flatMap { selectedTab(for: $0, in: window)?.id },
-                        sidebarVisible: window.sidebarVisible
+                        sidebarVisible: window.sidebarVisible,
+                        frame: window.frame
                     )
                 },
-            quickTerminal: quickTerminalSnapshot()
+            quickTerminal: quickTerminalSnapshot(),
+            desktopWidgets: desktopWidgetSnapshots()
         )
         // A closed or unloaded tab takes its bell out of the count with it.
         syncDockBadge()
@@ -1795,11 +1886,13 @@ final class AppState {
     /// too (#285), or a sweep would kill the very sessions the materialize
     /// step is about to reattach. So do the quick terminal's panes: restored
     /// at launch but attached only when the panel is first shown, they sit
-    /// at zero clients for exactly the window this sweep runs in.
+    /// at zero clients for exactly the window this sweep runs in. Desktop
+    /// widgets' sessions are claims for the same reason.
     private func claimedSessionNames() -> Set<String> {
         Set(allLivePanes().map(\.sessionName))
             .union(pendingPinnedSessionNames())
             .union(quickTerminalSessionNames())
+            .union(desktopWidgetSessionNames())
     }
 
     /// Every pane attached to a session, across ALL workspaces (pinned
@@ -2063,10 +2156,54 @@ final class AppState {
     ///
     /// Uses the same retention rule as `releaseSessions`, because what the
     /// user stands to lose is exactly what that function decides to kill.
+    ///
+    /// This is the ONE busy-close predicate. Every path that ends sessions —
+    /// pane close, tab close, project unload/remove, the sidebar's bulk
+    /// remove, the CLI's `busy` refusal and the Close Tab intent — asks one
+    /// of the overloads below rather than spelling
+    /// `allPanes().contains(where: \.needsConfirmClose)` itself: that raw
+    /// form ignores retention, so a tab holding only a `pane mirror` view
+    /// would warn about killing a session it does not kill.
     func closeNeedsConfirmation(_ closing: [Pane]) -> Bool {
         let retained = retainedSessionNames(excluding: closing)
-        return closing.contains { $0.needsConfirmClose && !retained.contains($0.sessionName) }
+        return closing.contains { paneNeedsConfirmClose($0) && !retained.contains($0.sessionName) }
     }
+
+    /// Whether closing (or, for a pinned tab, unloading) `tab` needs
+    /// confirmation. Closing a tab ends every session its panes hold alone.
+    func closeNeedsConfirmation(tab: TerminalTab) -> Bool {
+        closeNeedsConfirmation(tab.splitRoot.allPanes())
+    }
+
+    /// Whether unloading or removing the whole of project `projectID` needs
+    /// confirmation. Unknown or empty projects need none.
+    func closeNeedsConfirmation(projectID: UUID) -> Bool {
+        closeNeedsConfirmation(panes(inProject: projectID))
+    }
+
+    /// Every pane of the given projects (removed whole) and tabs, judged
+    /// TOGETHER: a mirror in one selected tab whose source sits in another
+    /// selected tab is killed by the removal, and only the joint set knows.
+    func closeNeedsConfirmation(projectIDs: [UUID], tabs: [(tabID: UUID, projectID: UUID)]) -> Bool {
+        var closing = projectIDs.flatMap(panes(inProject:))
+        for tab in tabs {
+            guard let tab = workspaces[tab.projectID]?.tabs.first(where: { $0.id == tab.tabID }) else { continue }
+            closing += tab.splitRoot.allPanes()
+        }
+        return closeNeedsConfirmation(closing)
+    }
+
+    private func panes(inProject projectID: UUID) -> [Pane] {
+        workspaces[projectID]?.tabs.flatMap { $0.splitRoot.allPanes() } ?? []
+    }
+
+    /// The per-pane half of the verdict — `Pane.needsConfirmClose` in
+    /// production. A seam because that property short-circuits on
+    /// `hasSurface`, and no pane in a windowless test ever builds one, so
+    /// without it the tab- and project-level guards could only be tested
+    /// against an always-idle pane.
+    @ObservationIgnored
+    var paneNeedsConfirmClose: (Pane) -> Bool = { $0.needsConfirmClose }
 
     private func shouldSweep(_ destination: String, now: Date) -> Bool {
         if let last = sweptDestinations[destination],
@@ -2150,6 +2287,39 @@ final class AppState {
         )
         selectProject(project)
         return project
+    }
+
+    /// A project per directory, in order, with the last one selected in
+    /// `window` (the key window's selection when nil) — what the Finder
+    /// service, Open With and a folder dropped on the sidebar all do. Always
+    /// creates, like the folder picker: a directory is not an identity, and a
+    /// second project on the same folder is a legitimate ask.
+    @discardableResult
+    func openProjects(atPaths paths: [String], store: ProjectStore, in window: WindowState? = nil) -> Project? {
+        var selected: Project?
+        for path in paths {
+            selected = store.create(name: (path as NSString).lastPathComponent, path: path)
+        }
+        if let selected { selectProject(selected, in: window) }
+        return selected
+    }
+
+    /// Rename a project from its sidebar row (the inline edit, which Rename
+    /// Current Project opens too). A name the pinned workspace reserves is
+    /// refused with a notice and the old name stays — as `project rename`
+    /// refuses it with a `bad_request`. The field has closed by the time the
+    /// name arrives, so the notice is the one place left to say why.
+    func renameProject(_ projectID: UUID, to name: String, store: ProjectStore) {
+        guard !PinnedTabs.reservesName(name) else {
+            present(.notice(
+                .reservedProjectName,
+                title: "Couldn't rename project",
+                message: PinnedTabs.reservedNameMessage,
+                host: .mainWindow
+            ))
+            return
+        }
+        store.rename(id: projectID, to: name)
     }
 
     /// Update the active project's path to wherever the focused pane currently
@@ -2274,72 +2444,44 @@ final class AppState {
         saveWorkspaces()
     }
 
-    /// An unload staged for confirmation because one of the project's panes
-    /// has a running foreground program — unload now stops every shell in
-    /// the project (keeping the layout), so it's destructive.
-    struct PendingUnloadProject: Equatable {
-        let projectID: UUID
-        var host: DialogHost = .mainWindow
-    }
-
-    var pendingUnloadProject: PendingUnloadProject?
-
-    /// Unload a project, confirming first when any pane is busy.
+    /// Unload a project, confirming first when any pane is busy — unload
+    /// stops every shell in the project (keeping the layout), so it's
+    /// destructive.
     func requestUnloadProject(_ projectID: UUID, host: DialogHost = .mainWindow) {
-        let busy = workspaces[projectID]?.tabs
-            .flatMap { $0.splitRoot.allPanes() }
-            .contains(where: \.needsConfirmClose) ?? false
-        if busy {
-            pendingUnloadProject = PendingUnloadProject(projectID: projectID, host: host)
+        guard closeNeedsConfirmation(projectID: projectID) else {
+            unloadProject(projectID)
             return
         }
-        unloadProject(projectID)
-    }
-
-    func confirmPendingUnloadProject() {
-        guard let pending = pendingUnloadProject else { return }
-        pendingUnloadProject = nil
-        unloadProject(pending.projectID)
-    }
-
-    func cancelPendingUnloadProject() {
-        pendingUnloadProject = nil
+        present(PendingDialog(
+            kind: .unloadProject(projectID),
+            title: "Unload project with running processes?",
+            message: "A process is still running in this project. Unloading stops every process in its tabs; the layout is kept.",
+            confirmTitle: "Unload",
+            host: host
+        ) { [weak self] in self?.unloadProject(projectID) })
     }
 
     /// Run `removal` (the caller's full remove: workspace + project store)
     /// immediately when no pane in the project is busy; otherwise stage it
     /// for the confirmation alert — removal kills every pane's zmx session.
-    func requestRemoveProject(_ projectID: UUID, host: DialogHost = .mainWindow, removal: @escaping () -> Void) {
-        let busy = workspaces[projectID]?.tabs
-            .flatMap { $0.splitRoot.allPanes() }
-            .contains(where: \.needsConfirmClose) ?? false
-        if busy {
-            pendingRemoveProject = PendingRemoveProject(projectID: projectID, completeRemoval: removal, host: host)
+    func requestRemoveProject(_ projectID: UUID, host: DialogHost = .mainWindow, removal: @escaping @MainActor () -> Void) {
+        guard closeNeedsConfirmation(projectID: projectID) else {
+            removal()
             return
         }
-        removal()
+        present(PendingDialog(
+            kind: .removeProject(projectID),
+            title: "Remove project with running processes?",
+            message: "A process is still running in this project. Removing it ends every process in its tabs.",
+            confirmTitle: "Remove",
+            host: host,
+            onConfirm: removal
+        ))
     }
 
-    func confirmPendingRemoveProject() {
-        guard let pending = pendingRemoveProject else { return }
-        pendingRemoveProject = nil
-        pending.completeRemoval()
-    }
-
-    func cancelPendingRemoveProject() {
-        pendingRemoveProject = nil
-    }
-
-    /// A bulk sidebar delete (multi-selection) staged for confirmation because
-    /// one or more affected panes has a running foreground program. Holds the
-    /// caller's full removal so it can run on confirm — a single dialog for the
-    /// whole selection instead of one per item.
-    struct PendingBulkRemove {
-        let completeRemoval: () -> Void
-    }
-
-    var pendingBulkRemove: PendingBulkRemove?
-
+    /// A bulk sidebar delete (multi-selection): run `removal` now, or stage
+    /// it when one or more affected panes has a running foreground program —
+    /// a single dialog for the whole selection instead of one per item.
     /// Run `removal` (the caller's full bulk close/remove) immediately when no
     /// affected pane is busy; otherwise stage it behind one confirmation alert.
     /// Mirrors `requestRemoveProject`/`requestCloseTab`, but for a whole
@@ -2347,42 +2489,20 @@ final class AppState {
     func requestRemoveSelection(
         projectIDs: [UUID],
         tabs: [(tabID: UUID, projectID: UUID)],
-        removal: @escaping () -> Void
+        removal: @escaping @MainActor () -> Void
     ) {
-        if selectionHasBusyPane(projectIDs: projectIDs, tabs: tabs) {
-            pendingBulkRemove = PendingBulkRemove(completeRemoval: removal)
+        guard closeNeedsConfirmation(projectIDs: projectIDs, tabs: tabs) else {
+            removal()
             return
         }
-        removal()
-    }
-
-    func confirmPendingBulkRemove() {
-        guard let pending = pendingBulkRemove else { return }
-        pendingBulkRemove = nil
-        pending.completeRemoval()
-    }
-
-    func cancelPendingBulkRemove() {
-        pendingBulkRemove = nil
-    }
-
-    /// True when any pane in the given projects (removed whole) or tabs has a
-    /// running foreground program needing quit-confirmation.
-    private func selectionHasBusyPane(projectIDs: [UUID], tabs: [(tabID: UUID, projectID: UUID)]) -> Bool {
-        for id in projectIDs {
-            let busy = workspaces[id]?.tabs
-                .flatMap { $0.splitRoot.allPanes() }
-                .contains(where: \.needsConfirmClose) ?? false
-            if busy { return true }
-        }
-        for tab in tabs {
-            let busy = workspaces[tab.projectID]?.tabs
-                .first { $0.id == tab.tabID }?
-                .splitRoot.allPanes()
-                .contains(where: \.needsConfirmClose) ?? false
-            if busy { return true }
-        }
-        return false
+        present(PendingDialog(
+            kind: .removeSelection,
+            title: "Remove items with running processes?",
+            message: "A process is still running in one of the selected items. Removing them ends every process in their tabs.",
+            confirmTitle: "Remove",
+            host: .mainWindow,
+            onConfirm: removal
+        ))
     }
 
     // MARK: - Tabs
@@ -2395,10 +2515,11 @@ final class AppState {
         projectID: UUID,
         projectPath: String,
         sessionSlug: String? = nil,
-        command: String? = nil
+        command: String? = nil,
+        env: [String: String]? = nil
     ) -> UUID? {
         guard let ws = workspaces[projectID] else { return nil }
-        let tab = ws.createTab(projectPath: projectPath, sessionSlug: sessionSlug, command: command)
+        let tab = ws.createTab(projectPath: projectPath, sessionSlug: sessionSlug, command: command, env: env)
         logger.debug("createTab: project=\(projectID, privacy: .public) tabs=\(ws.tabs.count, privacy: .public)")
         saveWorkspaces()
         return tab.id
@@ -2408,7 +2529,12 @@ final class AppState {
     /// Active pane falls back to the project path when no local cwd is available.
     /// The pinned workspace falls back to home.
     @discardableResult
-    func createTab(projectID: UUID, projects: [Project], command: String? = nil) -> UUID? {
+    func createTab(
+        projectID: UUID,
+        projects: [Project],
+        command: String? = nil,
+        env: [String: String]? = nil
+    ) -> UUID? {
         guard let projectDirectory = configuredProjectDirectory(projectID: projectID, projects: projects) else {
             return nil
         }
@@ -2419,18 +2545,41 @@ final class AppState {
             projectDirectory: projectDirectory,
             activePaneDirectory: activePaneDirectory
         ) ?? projectDirectory
+        return createTab(
+            projectID: projectID,
+            projects: projects,
+            workingDirectory: newTabDirectory,
+            command: command,
+            env: env
+        )
+    }
+
+    /// Creates a tab in an explicit `workingDirectory` — one of the project's
+    /// git worktrees, from the sidebar's Worktrees menu.
+    @discardableResult
+    func createTab(
+        projectID: UUID,
+        projects: [Project],
+        workingDirectory: String,
+        command: String? = nil,
+        env: [String: String]? = nil
+    ) -> UUID? {
+        guard let projectDirectory = configuredProjectDirectory(projectID: projectID, projects: projects) else {
+            return nil
+        }
         // The cwd is user-selectable, but zmx session grouping remains project-scoped.
         let projectSessionSlug = (projectDirectory as NSString).lastPathComponent
         return createTab(
             projectID: projectID,
-            projectPath: newTabDirectory,
+            projectPath: workingDirectory,
             sessionSlug: projectSessionSlug,
-            command: command
+            command: command,
+            env: env
         )
     }
 
     /// Returns the configured project root, including the synthetic pinned workspace fallback.
-    private func configuredProjectDirectory(projectID: UUID, projects: [Project]) -> String? {
+    func configuredProjectDirectory(projectID: UUID, projects: [Project]) -> String? {
         if projectID == PinnedTabs.projectID { return PinnedTabs.fallbackRoot }
         return projects.first(where: { $0.id == projectID })?.path
     }
@@ -2480,23 +2629,17 @@ final class AppState {
     /// destructive-confirmation lives here (quit will detach, not kill).
     func requestCloseTab(_ tabID: UUID, projectID: UUID) {
         let tab = workspaces[projectID]?.tabs.first { $0.id == tabID }
-        let busy = tab?.splitRoot.allPanes()
-            .contains(where: \.needsConfirmClose) ?? false
-        if busy {
-            pendingCloseTab = PendingCloseTab(tabID: tabID, projectID: projectID)
+        guard let tab, closeNeedsConfirmation(tab: tab) else {
+            closeTab(tabID, projectID: projectID)
             return
         }
-        closeTab(tabID, projectID: projectID)
-    }
-
-    func confirmPendingCloseTab() {
-        guard let pending = pendingCloseTab else { return }
-        pendingCloseTab = nil
-        closeTab(pending.tabID, projectID: pending.projectID)
-    }
-
-    func cancelPendingCloseTab() {
-        pendingCloseTab = nil
+        present(PendingDialog(
+            kind: .closeTab(tabID: tabID, projectID: projectID),
+            title: "Close running processes?",
+            message: "A process is still running in this tab. Closing the tab ends it.",
+            confirmTitle: "Close",
+            host: .mainWindow
+        ) { [weak self] in self?.closeTab(tabID, projectID: projectID) })
     }
 
     func selectTab(_ tabID: UUID, projectID: UUID) {
@@ -3022,7 +3165,8 @@ final class AppState {
         position: SplitPosition = .second,
         projectID: UUID,
         projectDirectory: String,
-        command: String? = nil
+        command: String? = nil,
+        env: [String: String]? = nil
     ) -> UUID? {
         guard let ws = workspaces[projectID],
               let tab = ws.tabs.first(where: { $0.splitRoot.findPane(id: paneID) != nil }),
@@ -3042,6 +3186,7 @@ final class AppState {
             position: position,
             projectID: projectID,
             command: command,
+            env: env,
             newPaneWorkingDirectory: newPaneDirectory
         )
     }
@@ -3057,6 +3202,7 @@ final class AppState {
         position: SplitPosition = .second,
         projectID: UUID,
         command: String? = nil,
+        env: [String: String]? = nil,
         newPaneWorkingDirectory: String? = nil
     ) -> UUID? {
         guard let ws = workspaces[projectID],
@@ -3067,6 +3213,7 @@ final class AppState {
             direction: direction,
             position: position,
             command: command,
+            env: env,
             newPaneWorkingDirectory: newPaneWorkingDirectory
         )
         saveWorkspaces()
@@ -3272,21 +3419,17 @@ final class AppState {
         let pane = workspaces[projectID]?.tabs
             .compactMap { $0.splitRoot.findPane(id: paneID) }
             .first
-        if let pane, closeNeedsConfirmation([pane]) {
-            pendingClosePane = PendingClosePane(paneID: paneID, projectID: projectID)
+        guard let pane, closeNeedsConfirmation([pane]) else {
+            closePane(paneID, projectID: projectID)
             return
         }
-        closePane(paneID, projectID: projectID)
-    }
-
-    func confirmPendingClosePane() {
-        guard let pending = pendingClosePane else { return }
-        pendingClosePane = nil
-        closePane(pending.paneID, projectID: pending.projectID)
-    }
-
-    func cancelPendingClosePane() {
-        pendingClosePane = nil
+        present(PendingDialog(
+            kind: .closePane(paneID: paneID, projectID: projectID),
+            title: "Close running process?",
+            message: "A process is still running in this pane. Close it anyway?",
+            confirmTitle: "Close",
+            host: .mainWindow
+        ) { [weak self] in self?.closePane(paneID, projectID: projectID) })
     }
 
     // MARK: - Layout files
@@ -3295,7 +3438,7 @@ final class AppState {
     /// workspace, reconciling with minimal destruction (see
     /// `LayoutReconciler`). A non-destructive reconcile (only spawns +
     /// resizes) runs immediately; one that would terminate panes/tabs is
-    /// staged in `pendingLayoutApply` for confirmation. Returns an error to
+    /// staged as a `pendingDialog` for confirmation. Returns an error to
     /// surface when no file matches, the file is unparseable, or it declares
     /// no tabs (an empty declaration must never plan "close every tab").
     @discardableResult
@@ -3328,7 +3471,20 @@ final class AppState {
         logger.info("applyLayout plan: \(planDesc, privacy: .public)")
         if plan.isDestructive {
             logger.info("applyLayout: staged for confirmation")
-            pendingLayoutApply = PendingLayoutApply(projectID: project.id, plan: plan, host: host)
+            let projectID = project.id
+            present(PendingDialog(
+                kind: .applyLayout(projectID: projectID),
+                title: "Apply layout?",
+                message: "Applying this layout will close some panes and end the processes running in them.",
+                confirmTitle: "Apply",
+                host: host
+            ) { [weak self] in
+                guard let self else { return }
+                executeLayoutPlan(plan, projectID: projectID)
+                // Always user-invoked: reaching here means they clicked through
+                // the destructive-apply confirmation.
+                presentToast("Layout applied")
+            })
         } else {
             executeLayoutPlan(plan, projectID: project.id)
         }
@@ -3336,33 +3492,20 @@ final class AppState {
     }
 
     /// `applyLayout` + error presentation: failures land in
-    /// `pendingLayoutError` (the alert in `MactermApp`). The shared entry
+    /// `pendingDialog` as a layout notice. The shared entry
     /// point for the palette/menu command and the Settings row menu — every
     /// caller is user-invoked, so a clean apply gets a success toast.
     func applyLayoutPresentingError(_ project: Project, host: DialogHost = .mainWindow) {
         if let error = applyLayout(project: project, host: host) {
-            pendingLayoutError = LayoutError(verb: "apply", message: error.localizedDescription, host: host)
+            presentLayoutError(verb: "apply", message: error.localizedDescription, host: host)
             return
         }
         // A destructive plan is staged, not applied — its confirmation dialog is
         // up, and the toast belongs to whatever the user chooses there
-        // (`confirmPendingLayoutApply`), not to merely opening the prompt.
-        if pendingLayoutApply == nil {
+        // (`confirmPendingDialog`), not to merely opening the prompt.
+        if !isLayoutApplyPending {
             presentToast("Layout applied")
         }
-    }
-
-    func confirmPendingLayoutApply() {
-        guard let pending = pendingLayoutApply else { return }
-        pendingLayoutApply = nil
-        executeLayoutPlan(pending.plan, projectID: pending.projectID)
-        // Always user-invoked: reaching here means they clicked through the
-        // destructive-apply confirmation.
-        presentToast("Layout applied")
-    }
-
-    func cancelPendingLayoutApply() {
-        pendingLayoutApply = nil
     }
 
     /// Save the project's live workspace as its central project file — one of
@@ -3397,8 +3540,8 @@ final class AppState {
             // pre-save state.
             noteLayoutFilesChanged()
             // A stray-*file* conflict (an unrelated file declares this path)
-            // takes priority over the shared-*project* notice — both write
-            // `pendingLayoutError`, so only surface the latter when the former
+            // takes priority over the shared-*project* notice — both raise
+            // a layout notice, so only surface the latter when the former
             // stayed quiet.
             if !presentSaveConflictIfNeeded(
                 project: project,
@@ -3421,7 +3564,7 @@ final class AppState {
             // directory isn't somewhere the user necessarily has in mind, so a
             // bare filename doesn't tell them where to go look. `~` keeps it
             // readable (and keeps the username out of a screenshot).
-            if pendingLayoutError == nil {
+            if pendingDialog == nil {
                 presentToast("Layout saved", subtitle: ProjectPath.homeContracted(target.path))
             }
             return nil
@@ -3465,12 +3608,12 @@ final class AppState {
         }
         guard !strays.isEmpty else { return false }
         let names = strays.map { "“\($0.url.lastPathComponent)”" }.joined(separator: ", ")
-        pendingLayoutError = LayoutError(
+        presentLayoutError(
             verb: "save",
             message: "The layout was saved to “\(target.lastPathComponent)”, but these other files also "
                 + "declare this project’s path and are ignored: \(names). "
                 + "Remove or merge them in the projects directory.",
-            customTitle: "Layout saved with a conflict",
+            title: "Layout saved with a conflict",
             host: host
         )
         return true
@@ -3497,13 +3640,13 @@ final class AppState {
         }
         guard !colliding.isEmpty else { return }
         let names = colliding.map { "“\($0.name)”" }.joined(separator: ", ")
-        pendingLayoutError = LayoutError(
+        presentLayoutError(
             verb: "save",
             message: "\(names) share this directory and layout file "
                 + "“\(target.lastPathComponent)” with this project. Saving here overwrote their "
                 + "layout, and each save wins over the last. Give the projects distinct names to "
                 + "keep separate layout files.",
-            customTitle: "Layout file shared with another project",
+            title: "Layout file shared with another project",
             host: host
         )
     }
@@ -3515,7 +3658,7 @@ final class AppState {
         host: DialogHost = .mainWindow
     ) {
         if let error = saveLayout(project: project, siblingProjects: siblingProjects, host: host) {
-            pendingLayoutError = LayoutError(verb: "save", message: error.localizedDescription, host: host)
+            presentLayoutError(verb: "save", message: error.localizedDescription, host: host)
         }
     }
 

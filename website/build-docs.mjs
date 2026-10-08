@@ -18,9 +18,9 @@
 //   -->
 //
 // Markdown conventions:
-//   ```lang title="path"     fenced code -> the shared .cmd block; title=""
-//                            adds a filename caption bar.
-//   > blockquote             the left-ruled aside style.
+//   ```lang title="path"     fenced code -> an ec-code CodeBlock; title=""
+//                            adds a filename caption row.
+//   > blockquote             a Note (ec-prose styles every blockquote as one).
 
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,9 @@ const PUBLIC_DIR = join(here, "public");
 // sitemap. No trailing slash.
 const SITE_URL = "https://macterm.thdxg.dev";
 
-const COPY_SVG = `<svg data-i="copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="block"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><svg data-i="check" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M20 6 9 17l-5-5"/></svg>`;
+// The design system's copy glyph: 16px, 1.5px stroke in currentColor (the
+// stroke comes from .ec-copy svg).
+const COPY_SVG = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg>`;
 
 const escapeHtml = (s) =>
   s
@@ -52,7 +54,9 @@ const urlForSlug = (slug) => (slug === "index" ? "/docs/" : `/docs/${slug}`);
 // ---- Minimal YAML-ish syntax highlighting for the layout sample -----------
 // Works on the raw source and escapes each emitted piece itself (highlighting-
 // then-escaping would mangle the quotes it keys on). Handles top-level
-// `key: value`, list dashes, `#` comments, and inline flow maps.
+// `key: value`, list dashes, `#` comments, and inline flow maps. Classes are
+// the design system's tok-* (Helix scope) names: keys are properties, numbers
+// and booleans constants, every other scalar a string.
 const span = (cls, text) => `<span class="${cls}">${escapeHtml(text)}</span>`;
 
 function highlightValue(val) {
@@ -63,7 +67,9 @@ function highlightValue(val) {
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     return escapeHtml(lead) + highlightFlowMap(trimmed) + escapeHtml(tail);
   }
-  const cls = /^".*"$/.test(trimmed) ? "text-syn-str" : "text-syn-val";
+  const cls = /^(true|false|null|~|-?\d+(\.\d+)?)$/.test(trimmed)
+    ? "tok-constant"
+    : "tok-string";
   return escapeHtml(lead) + span(cls, trimmed) + escapeHtml(tail);
 }
 
@@ -75,7 +81,7 @@ function highlightFlowMap(text) {
     const [, sp, key, colon, val, trail] = m;
     return (
       escapeHtml(sp) +
-      span("text-syn-key", key) +
+      span("tok-property", key) +
       escapeHtml(colon) +
       highlightValue(val) +
       escapeHtml(trail)
@@ -91,13 +97,13 @@ function highlightYaml(code) {
       let comment = "";
       const cm = line.match(/(\s+(?:\/\/|#).*)$/);
       if (cm) {
-        comment = span("text-syn-comment", cm[1]);
+        comment = span("tok-comment", cm[1]);
         line = line.slice(0, cm.index);
       }
       let dash = "";
       const dm = line.match(/^(\s*)(- )/);
       if (dm) {
-        dash = escapeHtml(dm[1]) + span("text-syn-dash", dm[2]);
+        dash = escapeHtml(dm[1]) + span("tok-punct", dm[2]);
         line = line.slice(dm[0].length);
       }
       const km = line.match(/^(\s*)([A-Za-z0-9_-]+)(\s*:\s*)([\s\S]*)$/);
@@ -106,7 +112,7 @@ function highlightYaml(code) {
         return (
           dash +
           escapeHtml(sp) +
-          span("text-syn-key", key) +
+          span("tok-property", key) +
           escapeHtml(colon) +
           highlightValue(val) +
           comment
@@ -117,29 +123,60 @@ function highlightYaml(code) {
     .join("\n");
 }
 
-// ---- Markdown renderer: dark code blocks ----------------------------------
-function buildRenderer() {
+// ---- Markdown renderer: headings and CodeBlocks ---------------------------
+// A heading's anchor: lowercased words joined by hyphens, as GitHub makes
+// them, so `/docs/configuration#project-colors` and the app's help buttons
+// (`DocsLink` in Macterm) can point at a section. A repeat on the same page
+// gets `-2`, `-3`.
+const slugifyHeading = (text) =>
+  text
+    .toLowerCase()
+    .replace(/<[^>]*>/g, "")
+    .replace(/&[a-z]+;/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-");
+
+function buildRenderer(seenAnchors) {
   return {
+    heading({ tokens, depth, text }) {
+      const base = slugifyHeading(text);
+      const count = (seenAnchors.get(base) || 0) + 1;
+      seenAnchors.set(base, count);
+      const id = count === 1 ? base : `${base}-${count}`;
+      return `<h${depth} id="${id}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
+    },
     code({ text, lang }) {
       const langBase = (lang || "").split(/\s+/)[0];
       const titleMatch = (lang || "").match(/title="([^"]*)"/);
       const title = titleMatch ? titleMatch[1] : null;
-      const body =
-        langBase === "yaml" || langBase === "yml"
-          ? highlightYaml(text)
-          : escapeHtml(text);
+      let body;
+      if (langBase === "yaml" || langBase === "yml") {
+        body = highlightYaml(text);
+      } else if (langBase === "console") {
+        // A console transcript marks its commands with `$ `; the prompt is
+        // drawn as a decorative span, and the copy button drops it.
+        body = text
+          .split("\n")
+          .map((line) =>
+            line.startsWith("$ ")
+              ? `<span class="prompt">$ </span>${escapeHtml(line.slice(2))}`
+              : escapeHtml(line)
+          )
+          .join("\n");
+      } else {
+        body = escapeHtml(text);
+      }
 
-      // Shares the .cmd component with the landing page's install commands —
-      // see the "Command blocks" section in src/tailwind.css. With a title the
-      // copy button sits in the caption row; without one it floats over the
-      // code, which is why the caption comes first either way.
-      const caption = title
-        ? `<div class="cmd-caption"><span>${escapeHtml(
+      // The design system's CodeBlock. With a title the copy button sits in
+      // the caption row; without one it floats over the code's top right.
+      const copy = `<button type="button" class="ec-copy" aria-label="Copy">${COPY_SVG}</button>`;
+      const pre = `<pre><code>${body}</code></pre>`;
+      return title
+        ? `<div class="ec-code" data-block><div class="ec-code-caption"><span>${escapeHtml(
             title
-          )}</span><button type="button" data-copy aria-label="Copy" class="cmd-copy">${COPY_SVG}</button></div>`
-        : `<button type="button" data-copy aria-label="Copy" class="cmd-copy">${COPY_SVG}</button>`;
-
-      return `<div data-block class="cmd">${caption}<pre><code>${body}</code></pre></div>`;
+          )}</span>${copy}</div>${pre}</div>`
+        : `<div class="ec-code" data-block>${pre}${copy}</div>`;
     },
   };
 }
@@ -164,7 +201,8 @@ function parsePage(raw, filename) {
 }
 
 // ---- Sidebar --------------------------------------------------------------
-// Group pages by their `group` (first-seen order); mark the current page active.
+// Group pages by their `group` (first-seen order); mark the current page with
+// aria-current, which is all DocsLayout needs to draw it.
 function renderSidebar(pages, currentSlug) {
   const groups = [];
   const index = new Map();
@@ -179,16 +217,13 @@ function renderSidebar(pages, currentSlug) {
     .map((g) => {
       const links = g.links
         .map((p) => {
-          const active = p.meta.slug === currentSlug ? " is-active" : "";
-          const aria = active ? ' aria-current="page"' : "";
-          return `        <a href="${urlForSlug(p.meta.slug)}" class="${
-            active ? "is-active" : ""
-          }"${aria}>${escapeHtml(p.meta.nav)}</a>`;
+          const aria = p.meta.slug === currentSlug ? ' aria-current="page"' : "";
+          return `        <a href="${urlForSlug(p.meta.slug)}"${aria}>${escapeHtml(p.meta.nav)}</a>`;
         })
         .join("\n");
-      return `      <div class="docs-sidebar-group">\n        <div class="docs-sidebar-label">${escapeHtml(
+      return `      <div class="ec-sidebar-group">\n        <p class="ec-sidebar-label">${escapeHtml(
         g.name
-      )}</div>\n${links}\n      </div>`;
+      )}</p>\n${links}\n      </div>`;
     })
     .join("\n");
 }
@@ -203,13 +238,14 @@ function renderPageNav(pages, index) {
   const prev = pages[index - 1];
   const next = pages[index + 1];
   if (!prev && !next) return "";
-  const link = (page, label) =>
-    `<a href="${urlForSlug(page.meta.slug)}">${escapeHtml(label)}</a>`;
-  // The empty <span> holds the grid slot when there is no previous page, so a
-  // lone "next" still sits right rather than sliding left.
-  const left = prev ? link(prev, `\u2190 ${prev.meta.nav}`) : "<span></span>";
-  const right = next ? link(next, `${next.meta.nav} \u2192`) : "<span></span>";
-  return `      <nav class="docs-pagenav">${left}${right}</nav>`;
+  // DocsLayout pushes a lone "next" to the right on its own (rel="next").
+  const link = (page, rel, label) =>
+    `<a href="${urlForSlug(page.meta.slug)}" rel="${rel}"><span>${label}</span>${escapeHtml(
+      page.meta.nav
+    )}</a>`;
+  return `      <nav class="ec-pagenav" aria-label="Pages">${
+    prev ? link(prev, "prev", "Previous") : ""
+  }${next ? link(next, "next", "Next") : ""}</nav>`;
 }
 
 function main() {
@@ -226,12 +262,15 @@ function main() {
   });
 
   const template = readFileSync(TEMPLATE, "utf8");
+  // Anchors are unique per page, so the table is cleared before each one.
+  const seenAnchors = new Map();
   const marked = new Marked({ gfm: true });
-  marked.use({ renderer: buildRenderer() });
+  marked.use({ renderer: buildRenderer(seenAnchors) });
 
   mkdirSync(OUT_DIR, { recursive: true });
 
   for (const [index, page] of pages.entries()) {
+    seenAnchors.clear();
     const content = marked.parse(page.body);
     const sidebar = renderSidebar(pages, page.meta.slug);
     const title =
@@ -303,7 +342,6 @@ function main() {
       .replaceAll("{{DESCRIPTION}}", () => escapeHtml(description))
       .replaceAll("{{CANONICAL}}", () => canonical)
       .replaceAll("{{SITE_URL}}", () => SITE_URL)
-      .replaceAll("{{GROUP}}", () => escapeHtml(page.meta.group))
       .replace("{{JSONLD}}", () => jsonld)
       .replace("<!-- SIDEBAR -->", () => sidebar)
       .replace("<!-- CONTENT -->", () => content)
@@ -327,12 +365,12 @@ function main() {
 // outright, so emitting `weekly` on every URL was pure noise.
 //
 // `lastmod` — there is no honest value available here. Source mtimes are set
-// by `git checkout`, and the Docker build copies them from a fresh clone, so
+// by `git checkout`, and the image build copies them from a fresh clone, so
 // every page would claim to have changed on every deploy. Google discounts a
 // lastmod that behaves that way, and a discounted lastmod is worth less than
 // none: it costs the signal on the pages that genuinely did change. Emitting
 // it properly needs a per-page commit date, which means git history inside the
-// build stage — the Dockerfile copies only website/ and assets/.
+// build stage — the Containerfile copies only website/ and assets/.
 //
 // `priority` is likewise advisory-at-best, but unlike the other two it is
 // cheap, stable, and honest: it says the landing page and docs index matter

@@ -455,6 +455,7 @@ extension AppState {
     /// "remove everything" (editor truncate-then-write saves, mid-edit
     /// typos); unparseable additionally suspends auto-writes.
     func reconcilePinnedLayoutAtLaunch(projects: [Project]) {
+        pinnedLayoutStore.migrateLegacyFile()
         switch pinnedLayoutStore.read() {
         case .absent:
             pinnedMembershipStamp = pinnedRecords.map(\.id)
@@ -544,7 +545,9 @@ extension AppState {
     /// rewrite the file.
     func persistForTermination() {
         refreshPinnedDeclarationsFromLiveTabs()
+        refreshDesktopWidgetRecipes()
         saveWorkspaces()
+        writeWidgetLayout()
         // Nothing pinned and no file ever written this run → don't create
         // (or churn) pinned.yaml for users who never touch the feature. The
         // membership stamp can't stand in for this check — the launch
@@ -688,11 +691,11 @@ extension AppState {
         guard !pinnedLayoutSuspended else { return }
         pinnedLayoutSuspended = true
         logger.error("pinned.yaml auto-save suspended: \(reason, privacy: .public)")
-        pendingLayoutError = LayoutError(
+        presentLayoutError(
             verb: "save",
             message: "\(reason)\n\nPinned-tab auto-save is paused so your edits aren’t overwritten. "
                 + "Fix the file (or delete it) to resume.",
-            customTitle: "Pinned layout file problem"
+            title: "Pinned layout file problem"
         )
     }
 

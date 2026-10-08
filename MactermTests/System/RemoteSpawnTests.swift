@@ -80,6 +80,30 @@ struct RemoteSpawnTests {
         #expect(!probe.contains("COLORTERM"))
     }
 
+    @Test
+    func pane_command_declares_the_terminal_program_host_side() {
+        // Claude Code sends OSC 9;4 progress — the agent's busy/done dot —
+        // only to TERM_PROGRAM=ghostty at 1.2.0 or later, and ssh carries
+        // neither variable on its own.
+        let cmd = RemoteSpawn.paneCommand(remote: remote, sessionName: "macterm-api-abc123") ?? ""
+        #expect(cmd.contains(RemoteSpawn.remoteTerminalProgramPreamble))
+        #expect(RemoteSpawn.remoteTerminalProgramPreamble.hasPrefix("TERM_PROGRAM=ghostty; export TERM_PROGRAM; "))
+        let preamble = RemoteSpawn.terminalProgramPreamble(version: "1.3.2-main+b368389")
+        #expect(preamble.contains("TERM_PROGRAM_VERSION=1.3.2-main+b368389; export TERM_PROGRAM_VERSION;"))
+        let op = RemoteSpawn.opArgv(remote: remote, zmxArguments: ["ls"])?.joined(separator: " ") ?? ""
+        let probe = RemoteSpawn.foregroundProbeArgv(remote: remote)?.joined(separator: " ") ?? ""
+        #expect(!op.contains("TERM_PROGRAM"))
+        #expect(!probe.contains("TERM_PROGRAM"))
+    }
+
+    @Test
+    func terminal_program_preamble_drops_a_version_that_is_not_plain() {
+        for version in [nil, "", "1.3; rm -rf ~", "1.3 beta", "1.3\"", "$(id)"] {
+            let preamble = RemoteSpawn.terminalProgramPreamble(version: version)
+            #expect(preamble == "TERM_PROGRAM=ghostty; export TERM_PROGRAM; ")
+        }
+    }
+
     // MARK: - Orphan sweep (#281)
 
     @Test
@@ -225,6 +249,9 @@ struct RemoteSpawnTests {
         #expect(RemoteSpawn.foregroundProbeScript.contains("pgid"))
         // The full command line rides along for layout `run:` capture.
         #expect(RemoteSpawn.foregroundProbeScript.contains("ps -o args="))
+        // The shell verdict is the host's own /etc/shells, not the Mac's.
+        #expect(RemoteSpawn.foregroundProbeScript.contains("done < /etc/shells"))
+        #expect(RemoteSpawn.foregroundProbeScript.contains("tmux|screen|zellij) ;;"))
         // The sh -c wrapper only survives arbitrary login shells while the
         // script stays free of single quotes.
         #expect(!RemoteSpawn.foregroundProbeScript.contains("'"))

@@ -24,17 +24,10 @@ on:
     types: [completed]
     branches: [main]
   # Manual re-run for a wedged tip (a cancelled publish, a transient gh-pages
-  # push failure). Builds whatever main is at now.
+  # push failure, a failed tag push). Builds whatever main is at now — or, if
+  # that exact version is already in the feed, only moves the tag (see the
+  # build job's "Check whether this version is already published").
   workflow_dispatch:
-
-# Single-flight, and deliberately NOT cancel-in-progress. Publishing is a
-# read-modify-write of appcast.xml on gh-pages plus a force-moved tag and an
-# asset swap; two runs interleaving there can leave the feed naming a DMG that
-# was pruned. Queuing costs runner minutes and gains correctness — the same
-# tradeoff ghostty makes, and for the same stated reason.
-concurrency:
-  group: release-tip
-  cancel-in-progress: false
 
 jobs:
   # Decide whether this commit gets a tip build, before spending ~20 minutes of
@@ -141,10 +134,10 @@ jobs:
           # a HEAD against its per-commit R2 object; we have no such object, and
           # a tag needs no extra state either.)
           #
-          # A workflow_dispatch deliberately IGNORES the ledger: if a run ever
-          # dies between the tag move and the appcast push, the tag says "built"
-          # while the feed is a build behind, and re-dispatching is the recovery
-          # path. It must not skip itself.
+          # A workflow_dispatch deliberately IGNORES the ledger: it is the manual
+          # recovery path, and must not skip itself. Re-running a commit whose
+          # build is already in the feed is safe because the build job notices
+          # and only moves the tag.
           if git rev-parse -q --verify refs/tags/tip >/dev/null; then
             TIP_SHA=$(git rev-parse refs/tags/tip^{commit})
             if [[ "$TIP_SHA" == "$SHA" && "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
@@ -164,6 +157,30 @@ jobs:
             fi
           fi
 
+          # Skip a commit CI has already moved past. Test runs aren't ordered,
+          # so this commit's Test can finish after a newer commit's — and with
+          # the build job cancelling in progress, an older run arriving last
+          # would kill the newer build and publish a stale tip. A newer commit
+          # with Test AND Checks green has a tip run of its own (or had one),
+          # which ships everything this commit does. Checks matters: a newer
+          # commit with red Checks never builds, so it must not starve this one.
+          # A manual dispatch builds main's HEAD and has nothing newer to defer to.
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+            git fetch --quiet origin main
+            for OTHER in $(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs?branch=main&event=push&status=success&per_page=30" \
+              --jq '.workflow_runs[].head_sha' | sort -u); do
+              [[ "$OTHER" != "$SHA" ]] || continue
+              git merge-base --is-ancestor "$SHA" "$OTHER" 2>/dev/null || continue
+              CHECKS=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/checks.yml/runs?head_sha=$OTHER&event=push" \
+                --jq '.workflow_runs[0].conclusion // ""')
+              case "$CHECKS" in
+                success|skipped) skip "newer commit $OTHER has already passed CI; its tip run supersedes this one" ;;
+              esac
+            done
+          fi
+
           echo "build=true" >> "$GITHUB_OUTPUT"
           echo "Building tip for $SHA"
 
@@ -172,6 +189,25 @@ jobs:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     runs-on: macos-26
+    # The newest commit replaces an older one still building: a tip build is
+    # ~20 minutes of macOS runner, and finishing one that a newer commit has
+    # already outdated only publishes it for a newer one to overwrite.
+    #
+    # On this job, not the workflow, so only a commit that has PASSED the gate
+    # can cancel a build — a workflow-level group let a red commit, or a
+    # docs-only one, kill a good build while its gate was still polling Checks,
+    # and then publish nothing itself. The gate also refuses an older commit
+    # whose Test happened to finish last (the gate's Decide step), which would
+    # otherwise cancel a newer build.
+    #
+    # One group still means one build at a time, so two publishes never
+    # interleave. A cancel that lands mid-publish leaves the feed, the release
+    # and the tag each at this build or the previous one, never naming a DMG
+    # that isn't attached (prune keeps $KEEP_ASSETS), and the tag moving LAST
+    # means the cancelling run simply publishes over it.
+    concurrency:
+      group: release-tip
+      cancel-in-progress: true
     permissions:
       contents: write
     env:
@@ -193,18 +229,67 @@ jobs:
           fetch-tags: true
           ref: ${{ needs.gate.outputs.sha }}
 
-      - uses: jdx/mise-action@v4.3.0
+      - name: Derive tip version
+        id: version
+        run: |
+          source scripts/_lib.sh
+          VERSION="$(macterm_tip_version)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Tip version: $VERSION  ($(sparkle_comparison_version "$VERSION"))"
+
+      # Is this exact build already in the feed? Then publishing it again
+      # would break it, so only the tag move below runs.
+      #
+      # The tag moves LAST, so a run that dies at the tag push (run 36758971974:
+      # `! [remote rejected] tip -> tip (failed)`) has already shipped: DMG on
+      # the release, item in the appcast. Re-running that commit derives the
+      # same version (it counts commits since the last vX.Y.Z tag, and main is
+      # linear, so a version names exactly one commit), rebuilds a DMG whose
+      # bytes differ (new signature, new image), and `--clobber`s the published
+      # asset of the same name — while publish-appcast.sh refuses to republish
+      # an equal version and keeps the OLD edSignature and length. Every tip
+      # follower's update then fails Sparkle's signature check.
+      #
+      # Read from the gh-pages BRANCH, not the served feed: that is what
+      # publish-appcast.sh itself reads and writes, and the CDNs in front of the
+      # site can serve a stale copy. A version missing from it (the upload
+      # landed but the gh-pages push failed) is republished in full, which is
+      # consistent: new DMG, new signature, one item.
+      - name: Check whether this version is already published
+        id: published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          source scripts/_lib.sh
+          COMPARISON="$(sparkle_comparison_version "$VERSION")"
+          if ! git fetch --depth=1 origin gh-pages; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "No gh-pages branch to read; building."
+          elif git show FETCH_HEAD:appcast.xml 2>/dev/null \
+            | grep -qF "<sparkle:version>${COMPARISON}</sparkle:version>"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            printf '%s is already in the appcast; skipping the build and only moving the tip tag.\n' "$VERSION" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: jdx/mise-action@v5.0.1
+        if: steps.published.outputs.published != 'true'
 
       # Pin the toolchain: `macos-26` defaults to whatever Xcode the image
       # currently ships, which is how macterm#340's type-check failure stayed
       # invisible here. See the action for the full rationale.
       - name: Select Xcode
         id: xcode
+        if: steps.published.outputs.published != 'true'
         uses: ./.github/actions/select-xcode
 
       # ISO week (YYYY-Www) — makes the GhosttyKit cache self-refresh weekly.
       - name: Cache epoch
         id: epoch
+        if: steps.published.outputs.published != 'true'
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       # Identical key to test/benchmark/release, so tip rides the cache they
@@ -212,6 +297,7 @@ jobs:
       # clean universal Release build, same as a stable one, so the shipped
       # binary can't inherit a stale incremental artifact.
       - name: Cache GhosttyKit
+        if: steps.published.outputs.published != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -226,27 +312,21 @@ jobs:
           key: ghosttykit-${{ hashFiles('scripts/setup.sh') }}-${{ steps.epoch.outputs.week }}
 
       - name: Setup GhosttyKit
+        if: steps.published.outputs.published != 'true'
         run: mise run setup --verbose
 
       # The SAME certificate stable and beta releases use. Signing tip with a
       # different identity (or ad-hoc) would reset the TCC privacy grants of
       # everyone who follows tip on every single build.
       - name: Import signing certificate
+        if: steps.published.outputs.published != 'true'
         uses: ./.github/actions/import-signing-cert
         with:
           certificate-p12: ${{ secrets.MACTERM_SIGNING_CERT_P12 }}
           certificate-password: ${{ secrets.MACTERM_SIGNING_CERT_PASSWORD }}
 
-      - name: Derive tip version
-        id: version
-        run: |
-          source scripts/_lib.sh
-          VERSION="$(macterm_tip_version)"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Tip version: $VERSION  ($(sparkle_comparison_version "$VERSION"))"
-
       - name: Build universal tip artifact
+        if: steps.published.outputs.published != 'true'
         env:
           SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -270,11 +350,12 @@ jobs:
       # and the run threw away a finished 20-minute universal build to report a
       # green no-op with no release. Any merge landing during a build did that.
       #
-      # Main moving does NOT make this build unpublishable — it just means a
-      # newer one is queued behind us, and publishing tip.2 now and tip.3 twenty
-      # minutes later is exactly the channel working. The only genuinely stale
-      # case is a tip that has ALREADY been published from a commit at or ahead
-      # of ours, which can only happen if two queued runs land out of order.
+      # Main moving does NOT make this build unpublishable. A newer commit that
+      # passes CI cancels this job through the concurrency group, so a build
+      # that got this far is the newest one CI has passed. The only genuinely
+      # stale case is a tip that has ALREADY been published from a commit at or
+      # ahead of ours, which the gate's out-of-order check narrows but can't
+      # close (it reads Test runs, not other tip runs).
       #
       # The `tip` tag records precisely that, because it moves LAST, after a
       # successful publish: if it is not an ancestor of the commit we built, a
@@ -304,7 +385,7 @@ jobs:
           fi
 
       - name: Update the tip release
-        if: steps.current.outputs.superseded != 'true'
+        if: steps.current.outputs.superseded != 'true' && steps.published.outputs.published != 'true'
         env:
           SHA: ${{ needs.gate.outputs.sha }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -371,7 +452,7 @@ jobs:
               done
 
       - name: Install Sparkle tools
-        if: steps.current.outputs.superseded != 'true'
+        if: steps.current.outputs.superseded != 'true' && steps.published.outputs.published != 'true'
         run: |
           SPARKLE_VERSION="2.9.1"
           curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz" -o sparkle.tar.xz
@@ -382,7 +463,7 @@ jobs:
       # never name an enclosure that isn't there yet. ROLLING=true replaces the
       # single tip item instead of appending one per commit.
       - name: Publish appcast
-        if: steps.current.outputs.superseded != 'true'
+        if: steps.current.outputs.superseded != 'true' && steps.published.outputs.published != 'true'
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -396,9 +477,10 @@ jobs:
       # already-built commit, so advancing it is the commit point of the whole
       # publish, and this order makes every failure self-heal on the next merge:
       # a failed asset upload or a failed gh-pages push leaves the ledger at the
-      # previous commit, so the next automatic run simply redoes this one (the
-      # appcast's own equal-version guard makes the redo a no-op if it was the
-      # tag push that failed). Move it any earlier and a mid-publish failure
+      # previous commit, so the next automatic run simply redoes this one. If it
+      # was this push that failed, the next merge's build supersedes it, and a
+      # re-run of the same commit finds its version already published and does
+      # nothing but this step. Move it any earlier and a mid-publish failure
       # leaves the ledger claiming a build nobody can download, with the gate
       # skipping that commit until someone re-dispatches by hand.
       #

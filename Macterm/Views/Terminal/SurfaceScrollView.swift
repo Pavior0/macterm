@@ -30,7 +30,10 @@ private func oid(_ object: AnyObject) -> String {
 /// iTerm2-style row accumulator lived here from #102 until it was removed in
 /// favor of ghostty's own path.) Scrollback geometry flows **into** this view
 /// via the `GHOSTTY_ACTION_SCROLLBAR` action (`onScrollbarUpdate`), and
-/// scroller drags flow **out** via the `scroll_to_row:<n>` keybind action.
+/// scroller drags flow **out** via the `scroll_to_row:<n>` keybind action,
+/// plus — with smooth scrolling on — the sub-row remainder of the drag as a
+/// precision scroll (`GhosttyTerminalNSView.applySubRowScrollOffset`), since
+/// `scroll_to_row` alone can only land on whole rows.
 final class SurfaceScrollView: NSScrollView {
     /// The Metal terminal surface. Owned by `Pane`; we just re-parent it into
     /// our document view.
@@ -256,7 +259,9 @@ final class SurfaceScrollView: NSScrollView {
         }
 
         verticalLineScroll = cellHeight
-        let docHeight = Self.documentHeight(total: total, cellHeight: cellHeight, viewportHeight: viewportHeight)
+        let docHeight = Self.documentHeight(
+            total: total, len: len, cellHeight: cellHeight, viewportHeight: viewportHeight
+        )
         if spacer.frame.height != docHeight || spacer.frame.width != contentView.bounds.width {
             spacer.frame = NSRect(x: 0, y: 0, width: contentView.bounds.width, height: docHeight)
         }
@@ -362,18 +367,29 @@ final class SurfaceScrollView: NSScrollView {
         guard cellHeight > 0, surfaceView.surface != nil else { return }
         let visible = contentView.documentVisibleRect
         let docHeight = spacer.frame.height
-        let row = Self.rowFromOffset(
+        let top = Self.topFromTop(
             visibleOriginY: visible.origin.y,
             visibleHeight: visible.height,
-            documentHeight: docHeight,
-            cellHeight: cellHeight
+            documentHeight: docHeight
         )
-        guard row != lastSentRow else {
-            layoutSurface()
-            return
-        }
+        let row = Self.row(at: top, cellHeight: cellHeight)
+        // The row first: it is the authoritative move, and it clears any
+        // sub-row offset the core was holding. The remainder goes after.
         sendScrollToRow(row)
+        sendSubRowOffset(top: top, row: row, cellHeight: cellHeight)
         layoutSurface()
+    }
+
+    /// The part of the drag that falls between two rows, handed to the
+    /// surface so a scroller drag scrolls by pixels like the wheel does.
+    /// Skipped unless the user has smooth scrolling on (the core would keep
+    /// the remainder without drawing it) and unless there is scrollback to
+    /// drag through — with none, the scroller is inert and a synthetic
+    /// scroll would only reach a mouse-reporting program.
+    private func sendSubRowOffset(top: CGFloat, row: Int, cellHeight: CGFloat) {
+        guard Preferences.shared.smoothScrolling, snapshot.total > snapshot.len else { return }
+        let remainder = top - CGFloat(row) * cellHeight
+        surfaceView.applySubRowScrollOffset(pointsBelowRow: remainder)
     }
 
     private func sendScrollToRow(_ requestedRow: Int) {
@@ -424,8 +440,23 @@ final class SurfaceScrollView: NSScrollView {
 extension SurfaceScrollView {
     /// Height of the blank document view (points). At least the viewport height
     /// so there's nothing to scroll when scrollback is empty.
-    nonisolated static func documentHeight(total: UInt64, cellHeight: CGFloat, viewportHeight: CGFloat) -> CGFloat {
-        max(CGFloat(total) * cellHeight, viewportHeight)
+    ///
+    /// Sized so the clip view's own travel (`documentHeight - viewportHeight`)
+    /// is exactly the scrollable rows, `total - len`. The viewport is **not**
+    /// a whole number of rows — libghostty floors the grid and keeps the
+    /// leftover as padding — so a document of `total * cellHeight` gives a
+    /// travel of `total * cellHeight - viewportHeight`, and a drag to the
+    /// very bottom then asks for a row short of the last one by however much
+    /// padding there is (a visible strip of unreachable scrollback). Carrying
+    /// the padding in the document instead keeps both ends exact.
+    nonisolated static func documentHeight(
+        total: UInt64,
+        len: UInt64,
+        cellHeight: CGFloat,
+        viewportHeight: CGFloat
+    ) -> CGFloat {
+        let scrollableRows = CGFloat(max(0, Int64(total) - Int64(len)))
+        return max(scrollableRows * cellHeight + viewportHeight, viewportHeight)
     }
 
     /// AppKit clip-view origin (points, Y-up from the document bottom) that
@@ -439,17 +470,36 @@ extension SurfaceScrollView {
         return CGFloat(max(0, rowsBelow)) * cellHeight
     }
 
-    /// Inverse of `documentOffsetY`: the top visible row (from the top of
-    /// history) for a given clip-view position. Used when the user drags the
-    /// scroller, to tell the core which row to scroll to.
+    /// Inverse of `documentOffsetY`: how far the clip view's top sits from
+    /// the top of history, in points. Used when the user drags the scroller
+    /// — its whole part says which row to scroll to, and what is left over
+    /// is the sub-row offset smooth scrolling draws.
+    nonisolated static func topFromTop(
+        visibleOriginY: CGFloat,
+        visibleHeight: CGFloat,
+        documentHeight: CGFloat
+    ) -> CGFloat {
+        max(0, documentHeight - visibleOriginY - visibleHeight)
+    }
+
+    /// The top visible row for a clip-view position `topFromTop` resolved.
+    nonisolated static func row(at topFromTop: CGFloat, cellHeight: CGFloat) -> Int {
+        guard cellHeight > 0 else { return 0 }
+        return max(0, Int(topFromTop / cellHeight))
+    }
+
+    /// Both halves at once, for callers that only want the row.
     nonisolated static func rowFromOffset(
         visibleOriginY: CGFloat,
         visibleHeight: CGFloat,
         documentHeight: CGFloat,
         cellHeight: CGFloat
     ) -> Int {
-        guard cellHeight > 0 else { return 0 }
-        let topFromTop = documentHeight - visibleOriginY - visibleHeight
-        return max(0, Int(topFromTop / cellHeight))
+        row(
+            at: topFromTop(
+                visibleOriginY: visibleOriginY, visibleHeight: visibleHeight, documentHeight: documentHeight
+            ),
+            cellHeight: cellHeight
+        )
     }
 }

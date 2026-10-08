@@ -102,6 +102,9 @@ struct ControlArgs: Codable, Equatable {
     var key: String?
     /// Drop zone for the debug-only `pane.move`: `left`/`right`/`top`/`bottom`.
     var zone: String?
+    /// Reply to the pane's password bubble (debug-only `pane.password`):
+    /// `accept`, `dismiss` or `autofill`. Nil just reads the state.
+    var answer: String?
     /// Destination pane selector for `pane.move` (same tab); nil = the
     /// workspace edge (a root-level move).
     var dest: String?
@@ -124,6 +127,11 @@ struct ControlArgs: Codable, Equatable {
     /// the text but only the CLI can see whether its stdout is a tty, so the
     /// verdict travels with the request.
     var styled: Bool?
+    /// Desktop widget selector (`widget.*`): 1-based index (`widget:N` or
+    /// `N`) in `widget list` order, or its id.
+    var widget: String?
+    /// Desktop widget size (`widget.new`, `widget.set`): a `CxR` grid span.
+    var size: String?
 
     init(
         project: String? = nil,
@@ -149,7 +157,8 @@ struct ControlArgs: Codable, Equatable {
         reset: Bool? = nil,
         submit: Bool? = nil,
         topic: String? = nil,
-        styled: Bool? = nil
+        styled: Bool? = nil,
+        answer: String? = nil
     ) {
         self.project = project
         self.tab = tab
@@ -169,6 +178,7 @@ struct ControlArgs: Codable, Equatable {
         self.key = key
         self.zone = zone
         self.dest = dest
+        self.answer = answer
         self.slot = slot
         self.title = title
         self.reset = reset
@@ -235,6 +245,12 @@ struct ControlData: Codable {
     var dump: ControlPaneDump?
     /// Rendered tutorial text (`tutor.render`).
     var tutorial: ControlTutorial?
+    /// The pane's password-prompt state (debug-only `pane.password`).
+    var password: ControlPasswordState?
+    /// Desktop widgets (`widget.*`).
+    var widgets: [ControlWidgetInfo]?
+    /// Custom palette files (`palette.list`).
+    var palettes: [ControlPaletteInfo]?
 
     init(
         status: ControlStatusInfo? = nil,
@@ -245,7 +261,10 @@ struct ControlData: Codable {
         sessions: [ControlSessionInfo]? = nil,
         inspect: ControlPaneInspect? = nil,
         dump: ControlPaneDump? = nil,
-        tutorial: ControlTutorial? = nil
+        tutorial: ControlTutorial? = nil,
+        password: ControlPasswordState? = nil,
+        widgets: [ControlWidgetInfo]? = nil,
+        palettes: [ControlPaletteInfo]? = nil
     ) {
         self.status = status
         self.projects = projects
@@ -256,7 +275,25 @@ struct ControlData: Codable {
         self.inspect = inspect
         self.dump = dump
         self.tutorial = tutorial
+        self.password = password
+        self.palettes = palettes
+        self.widgets = widgets
     }
+}
+
+/// What the password monitor knows about a pane (debug-only `pane.password`):
+/// its phase, the prompt it confirmed, and which bubble is up. Never the
+/// password itself.
+struct ControlPasswordState: Codable, Equatable {
+    /// `idle`, `sighted`, `prompting` or `verifying`.
+    var phase: String
+    /// The confirmed prompt line and command while `prompting`.
+    var prompt: String?
+    var command: String?
+    /// A password is saved for the confirmed prompt.
+    var saved: Bool
+    /// `autofill`, `rejected`, `save`, `update`, or nil for no bubble.
+    var bubble: String?
 }
 
 struct ControlStatusInfo: Codable, Equatable {
@@ -267,6 +304,13 @@ struct ControlStatusInfo: Codable, Equatable {
 }
 
 struct ControlProjectInfo: Codable, Equatable {
+    /// 1-based position in `project list` order, rendered as `project:N` —
+    /// the number `--project` resolves an index against. Carried on every
+    /// reply, so a single-project one (create, select, rename) names the same
+    /// position the list does. nil for the pinned workspace, which is not a
+    /// `project list` row (it is addressed as `pinned`), and from a server
+    /// predating this field (optional per the additive-field convention).
+    var index: Int?
     var id: String
     var name: String
     var path: String
@@ -313,6 +357,21 @@ struct ControlPaneInfo: Codable, Equatable {
 
 /// One open terminal window. `project` is what its titlebar and the macOS
 /// Window menu show — each window tracks its own.
+/// One custom palette file (`CustomPaletteStore.Entry`), as `palette list`
+/// reports it: the file's stem is its id, `error` is why it didn't read.
+struct ControlPaletteInfo: Codable, Equatable {
+    var id: String
+    var file: String
+    /// The palette's `name:`; absent when the file didn't read.
+    var name: String?
+    var description: String?
+    /// Settings → Palettes' switch.
+    var enabled: Bool
+    /// Its keybind as the user wrote it, when bound.
+    var keybind: String?
+    var error: String?
+}
+
 struct ControlWindowInfo: Codable, Equatable {
     /// 1-based position in creation order, rendered `window:N`.
     var index: Int
@@ -328,6 +387,27 @@ struct ControlWindowInfo: Codable, Equatable {
     /// Whether this window renders a mirror view of that tab because another
     /// window owns its panes (#345): the same sessions attached a second time.
     var mirrored: Bool?
+}
+
+/// One desktop widget: a terminal on the desktop.
+struct ControlWidgetInfo: Codable, Equatable {
+    /// 1-based position in creation order, rendered `widget:N`.
+    var index: Int
+    var id: String
+    var name: String?
+    /// The widget pane's zmx session name.
+    var session: String
+    /// The grid span, `CxR`.
+    var size: String
+    /// Grid span in cells.
+    var columns: Int
+    var rows: Int
+    /// Whether this is the widget unlocked for editing (at most one is).
+    var editing: Bool
+    /// Top-left corner in global screen points (AppKit's y-up space).
+    var x: Double
+    var y: Double
+    var command: String?
 }
 
 struct ControlSessionInfo: Codable, Equatable {

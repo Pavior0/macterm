@@ -16,7 +16,15 @@ private let logger = Logger(subsystem: appBundleID, category: "WorkspacePersiste
 /// older build would restore ignoring the window list and then SAVE without it,
 /// silently collapsing a multi-window setup back to one. The version gate turns
 /// that into refuse-to-save instead.
-private let currentSchemaVersion = 6
+/// v7 adds `desktopWidgets`, for v5's reason again: an older build would
+/// restore without the widgets and then save without them — and its orphan
+/// reaper would kill their sessions, since nothing it restored claims them.
+/// Unlike v5 and v6, it is written only while there ARE widgets to protect:
+/// a file with none is written as v6, so switching to an older build (the
+/// stable channel after a spell on tip) keeps saving for everyone who never
+/// made a widget, whom the gate would otherwise freeze for nothing.
+private let currentSchemaVersion = 7
+private let widgetFreeSchemaVersion = 6
 
 /// Top-level on-disk representation. Wraps the workspace array so we can
 /// evolve the file format (add fields, do migrations) without renaming the
@@ -45,6 +53,33 @@ struct WorkspacesFile: Codable {
     /// losing them is that build's normal behavior rather than data loss —
     /// not worth freezing the user's whole workspace persistence over.
     var quickTerminal: TabSnapshot?
+    /// Desktop widgets (v7+), in creation order. Optional so a v6 file
+    /// decodes with nil — no widgets.
+    var desktopWidgets: [DesktopWidgetSnapshot]?
+}
+
+/// One desktop widget's restorable state (v7+): its one tab (the session
+/// identity it reattaches by) and where it sits on the desktop. Whether it
+/// was being edited is deliberately absent — every widget launches locked.
+struct DesktopWidgetSnapshot: Codable {
+    var id: UUID
+    var name: String?
+    var tab: TabSnapshot
+    /// The widget's span in grid cells (`DesktopWidgetSpan`).
+    var columns: Int
+    var rows: Int
+    /// Top-left corner in global AppKit screen coordinates — where it was at
+    /// the save, which after a display change can be a projection.
+    var topLeftX: Double
+    var topLeftY: Double
+    /// The respawn recipe (`DesktopWidget.command`/`cwd`).
+    var command: String?
+    var cwd: String?
+    /// Where the user put it per display and resolution
+    /// (`DesktopWidget.placements`). Optional, with no schema bump: a
+    /// snapshot from before it existed decodes as nil and the widget's
+    /// placement is taken from `topLeft`, and an older build ignores it.
+    var placements: [DesktopWidgetPlacement]?
 }
 
 /// One window's restorable state (v6+).
@@ -73,6 +108,14 @@ struct WindowSnapshot: Codable {
     /// leaked one window's collapsed state into the next window at that slot.
     /// nil (an older snapshot) means shown.
     var sidebarVisible: Bool?
+    /// The window's frame, as AppKit's own `frameDescriptor` string (the frame
+    /// plus the screen it was on, so `setFrame(from:)` can fit it to a display
+    /// that has since changed). Owned here rather than left to SwiftUI's
+    /// `WindowGroup` autosave, whose key embeds runtime addresses and so is
+    /// written fresh and never read back on every launch (#496). nil (an older
+    /// snapshot, or a window that never reported a frame) opens at the
+    /// scene's default size.
+    var frame: String?
 }
 
 // MARK: - Snapshot types
@@ -127,6 +170,17 @@ struct PaneSnapshot: Codable {
     /// outlive the shell process, and `.idle` is the default. Optional so older
     /// snapshots (without the field) decode as nil / idle.
     var needsAttention: Bool?
+    /// Whether that attention-needing completion was a failure (an OSC 9;4
+    /// ERROR, `Pane.completionFailed`), so a red dot survives a restart as
+    /// red. Its own optional key rather than a new meaning for
+    /// `needsAttention`, so builds either side of it read each other's files:
+    /// an older build ignores the key and shows the dot green, and a file
+    /// without it decodes as nil — not failed. Written only when true, and
+    /// only beside `needsAttention`, so a file with no failure in it is the
+    /// same file an older build writes. Not a schema bump: a downgrade that
+    /// re-saves the file loses only the dot's color, not worth refusing saves
+    /// over (see `currentSchemaVersion`).
+    var completionFailed: Bool?
     /// Stable zmx session id (`Pane.sessionID`). On restore the rebuilt pane
     /// reuses it, so its shell reattaches to the still-running daemon instead
     /// of spawning fresh. Optional: older snapshots decode nil → fresh id.
@@ -150,6 +204,7 @@ struct PaneSnapshot: Codable {
         id: UUID,
         projectPath: String,
         needsAttention: Bool? = nil,
+        completionFailed: Bool? = nil,
         sessionID: UUID? = nil,
         sessionName: String? = nil,
         workingDirectory: String? = nil
@@ -157,6 +212,7 @@ struct PaneSnapshot: Codable {
         self.id = id
         self.projectPath = projectPath
         self.needsAttention = needsAttention
+        self.completionFailed = completionFailed
         self.sessionID = sessionID
         self.sessionName = sessionName
         self.workingDirectory = workingDirectory
@@ -211,6 +267,8 @@ final class WorkspaceStore {
         /// The quick terminal's tab; nil for a file written before it was
         /// persisted.
         var quickTerminal: TabSnapshot?
+        /// Desktop widgets (v7+); empty for an older file.
+        var desktopWidgets: [DesktopWidgetSnapshot] = []
     }
 
     func load() -> Loaded {
@@ -246,7 +304,8 @@ final class WorkspaceStore {
                     pinned: migrated.pinned ?? [],
                     pinnedActiveTabID: migrated.pinnedActiveTabID,
                     windows: migrated.windows ?? [],
-                    quickTerminal: migrated.quickTerminal
+                    quickTerminal: migrated.quickTerminal,
+                    desktopWidgets: migrated.desktopWidgets ?? []
                 )
             }
             let migrated = migrate(file)
@@ -255,7 +314,8 @@ final class WorkspaceStore {
                 pinned: migrated.pinned ?? [],
                 pinnedActiveTabID: migrated.pinnedActiveTabID,
                 windows: migrated.windows ?? [],
-                quickTerminal: migrated.quickTerminal
+                quickTerminal: migrated.quickTerminal,
+                desktopWidgets: migrated.desktopWidgets ?? []
             )
         } catch let envelopeError {
             // Fallback: pre-envelope format where the file was a bare array of
@@ -277,7 +337,8 @@ final class WorkspaceStore {
         pinned: [PinnedTabSnapshot] = [],
         pinnedActiveTabID: UUID? = nil,
         windows: [WindowSnapshot]? = nil,
-        quickTerminal: TabSnapshot? = nil
+        quickTerminal: TabSnapshot? = nil,
+        desktopWidgets: [DesktopWidgetSnapshot] = []
     ) {
         guard !loadFailed else {
             logger.error("Refusing to save workspaces: prior load failed, file preserved")
@@ -285,12 +346,13 @@ final class WorkspaceStore {
         }
         do {
             let file = WorkspacesFile(
-                version: currentSchemaVersion,
+                version: desktopWidgets.isEmpty ? widgetFreeSchemaVersion : currentSchemaVersion,
                 workspaces: snapshots,
                 pinned: pinned,
                 pinnedActiveTabID: pinnedActiveTabID,
                 windows: windows,
-                quickTerminal: quickTerminal
+                quickTerminal: quickTerminal,
+                desktopWidgets: desktopWidgets.isEmpty ? nil : desktopWidgets
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -313,7 +375,8 @@ final class WorkspaceStore {
                 pinned: file.pinned,
                 pinnedActiveTabID: file.pinnedActiveTabID,
                 windows: file.windows,
-                quickTerminal: file.quickTerminal
+                quickTerminal: file.quickTerminal,
+                desktopWidgets: file.desktopWidgets
             )
         }
         return file
@@ -340,6 +403,7 @@ final class WorkspaceStore {
         switch node {
         case var .pane(p):
             p.needsAttention = nil
+            p.completionFailed = nil
             return .pane(p)
         case let .split(b):
             return .split(SplitBranchSnapshot(
@@ -433,10 +497,12 @@ enum WorkspaceSerializer {
                 ? nil
                 : (p.nsView?.currentPwd ?? ProcessInspector.foregroundWorkingDirectory(forPane: p))
             let needsAttention = p.executionState == .done
+            let completionFailed = needsAttention && p.completionFailed
             return .pane(PaneSnapshot(
                 id: p.id,
                 projectPath: p.projectPath,
                 needsAttention: needsAttention,
+                completionFailed: completionFailed ? true : nil,
                 sessionID: p.sessionID,
                 sessionName: p.sessionName,
                 workingDirectory: liveCwd
@@ -472,7 +538,7 @@ enum WorkspaceSerializer {
                 sessionName: p.sessionName
             )
             if p.needsAttention == true {
-                pane.restoreNeedsAttention()
+                pane.restoreNeedsAttention(failed: p.completionFailed == true)
             }
             return .pane(pane)
         case let .split(b):

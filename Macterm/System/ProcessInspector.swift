@@ -76,6 +76,70 @@ enum ProcessInspector {
         return displayCommand(args)
     }
 
+    /// Who is reading a password in the pane: the foreground program named
+    /// by its executable's real path — what a saved password is filed under.
+    /// `runningCommand` above reads argv, which the process sets for itself:
+    /// `exec -a ssh ./fake prod` reports `ssh prod` and would collect the
+    /// password saved for the real ssh. `proc_pidpath` comes from the
+    /// kernel's vnode, so only the binary at that path matches. Arguments stay
+    /// argv (the program parses those itself, so it can't be lied to about
+    /// them). A shell running a script or a `-c` command counts as a program
+    /// here (`isIdleShellInvocation`), so a prompt inside `./deploy.sh` is
+    /// filed under the script; an idle shell is `.shell`. Anything unreadable
+    /// is `.unknown`, never `.shell`: a prompt-alone entry must not answer a
+    /// program Macterm merely failed to identify.
+    @MainActor
+    static func passwordAsker(forPane pane: Pane) -> PasswordAsker {
+        guard let pid = foregroundPID(forPane: pane), let args = argv(pid: pid), !args.isEmpty else { return .unknown }
+        if isIdleShellInvocation(args) { return .shell }
+        guard let path = executablePath(pid: pid), let command = displayCommand([path] + args.dropFirst()) else {
+            return .unknown
+        }
+        return .program(path: path, command: command, isProtected: isProtectedExecutable(atPath: path))
+    }
+
+    /// Whether no process running as this user can have replaced or changed
+    /// the executable at `path`: it and every directory above it are owned by
+    /// root and not writable by us. That holds for the sealed system volume
+    /// (`/usr/bin/sudo`, `/usr/bin/ssh`) and for root-owned installs such as
+    /// the Command Line Tools; it fails for Homebrew (`/opt/homebrew` belongs
+    /// to the user), anything under the home directory, and a directory the
+    /// admin group can write when the user is an admin. `lstat`, so a symlink
+    /// the user owns anywhere on the way counts against it.
+    nonisolated static func isProtectedExecutable(atPath path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        var current = (path as NSString).standardizingPath
+        while true {
+            var info = stat()
+            guard lstat(current, &info) == 0, info.st_uid == 0 else { return false }
+            // `access` answers for the real uid and folds in group and ACL
+            // grants; EACCES/EPERM/EROFS all mean "not by us".
+            if access(current, W_OK) == 0 { return false }
+            guard errno == EACCES || errno == EPERM || errno == EROFS else { return false }
+            if current == "/" { return true }
+            current = (current as NSString).deletingLastPathComponent
+        }
+    }
+
+    /// The executable of a remote project's local ssh client — the surface's
+    /// own foreground, since a remote pane has no zmx hop — as `passwordAsker`
+    /// would judge it. Nil when the surface has no readable foreground.
+    @MainActor
+    static func surfaceExecutable(forPane pane: Pane) -> (path: String, isProtected: Bool)? {
+        guard let pid = pane.nsView?.foregroundPID, let path = executablePath(pid: pid) else { return nil }
+        return (path, isProtectedExecutable(atPath: path))
+    }
+
+    /// The executable's resolved absolute path from the kernel
+    /// (`proc_pidpath`), or nil when the process is gone or unreadable.
+    static func executablePath(pid: pid_t) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE (4 × MAXPATHLEN) isn't imported into Swift.
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
     /// The display *name* of the pane's foreground process — the kernel's short
     /// accounting name (`hx`, `btop`, `nvim`), with no path and no arguments.
     /// Returns nil when the pane is idle at a shell prompt (the foreground
@@ -147,6 +211,39 @@ enum ProcessInspector {
         }
         return name
     }
+
+    /// The names a remote foreground may have been invoked as, from its
+    /// `ps -o args=` line — the remote stand-in for `invokedName(argv:)`.
+    /// `args` joins argv with spaces and loses the quoting, so for an
+    /// interpreter the script path's end can't be read back: `node /home/me/My
+    /// Tools/gemini/bin/gemini --yolo`. So each possible end is offered in
+    /// turn, shortest first (`My`, then `gemini`), and the caller takes the
+    /// first one it recognizes. A word starting with `-` (a flag), `/` or `~`
+    /// (another path: a spaced path continues with `Tools/…`, never `/…`),
+    /// or a path with a script extension ends the script path. Anything else
+    /// is argv[0] alone, which an invoked name rarely puts a space in.
+    static func remoteInvokedNames(commandLine: String) -> [String] {
+        let words = commandLine.split(separator: " ").map(String.init)
+        guard let argv0 = words.first else { return [] }
+        guard words.count > 1, let program = invokedName(argv: [argv0]), isInterpreterName(program) else {
+            return invokedName(argv: [argv0]).map { [$0] } ?? []
+        }
+        var names: [String] = []
+        var script = ""
+        for word in words.dropFirst().prefix(maxRemoteScriptWords) {
+            guard !word.hasPrefix("-"), script.isEmpty || !(word.hasPrefix("/") || word.hasPrefix("~")) else {
+                break
+            }
+            script = script.isEmpty ? word : script + " " + word
+            if let name = invokedName(argv: [argv0, script]) { names.append(name) }
+            if scriptExtensions.contains((script as NSString).pathExtension.lowercased()) { break }
+        }
+        return names
+    }
+
+    /// Bounds `remoteInvokedNames` on a long command line. A script path
+    /// with more spaces than this is left unrecognized.
+    private static let maxRemoteScriptWords = 8
 
     /// Whether `name` is a script interpreter — a process name that can never
     /// identify the CLI being run (the script in argv[1] does).
@@ -269,16 +366,74 @@ enum ProcessInspector {
     }
 
     static func terminalInputIsRaw(ttyPath: String?) -> Bool {
-        guard let ttyPath else { return false }
+        guard let flags = localModes(ttyPath: ttyPath) else { return false }
+        let canonical = flags & tcflag_t(ICANON) != 0
+        let echo = flags & tcflag_t(ECHO) != 0
+        return !canonical || !echo
+    }
+
+    /// The tty's local modes (`c_lflag`), or nil when it can't be read.
+    private static func localModes(ttyPath: String?) -> tcflag_t? {
+        guard let ttyPath else { return nil }
         let fd = open(ttyPath, O_RDONLY | O_NOCTTY | O_NONBLOCK)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return nil }
         defer { close(fd) }
 
         var attrs = termios()
-        guard tcgetattr(fd, &attrs) == 0 else { return false }
-        let canonical = attrs.c_lflag & tcflag_t(ICANON) != 0
-        let echo = attrs.c_lflag & tcflag_t(ECHO) != 0
-        return !canonical || !echo
+        guard tcgetattr(fd, &attrs) == 0 else { return nil }
+        return attrs.c_lflag
+    }
+
+    /// Whether the program in the pane's foreground is reading a password:
+    /// the tty is in canonical mode with echo off. That is the mode
+    /// `readpassphrase(3)`, `getpass(3)`, ssh, sudo, su, Python's `getpass`,
+    /// Go's `term.ReadPassword` and Rust's `rpassword` all put it in, and
+    /// almost nothing else holds it — shells and TUIs run raw, ordinary
+    /// commands echo. It is ghostty's own rule (`termio/Exec.zig`), and
+    /// iTerm2's.
+    ///
+    /// Read from the same tty `terminalInputIsRaw` reads, for the same reason:
+    /// libghostty's own check sees the `zmx attach` client's pty, which is
+    /// permanently raw, so under zmx it never fires. A remote project's pane
+    /// has no local zmx, so its surface pty is where its ssh asks.
+    @MainActor
+    static func terminalIsReadingPassword(forPane pane: Pane) -> Bool {
+        terminalIsReadingPassword(ttyPath: lineDisciplineTTYPath(forPane: pane))
+    }
+
+    static func terminalIsReadingPassword(ttyPath: String?) -> Bool {
+        guard let flags = localModes(ttyPath: ttyPath) else { return false }
+        let canonical = flags & tcflag_t(ICANON) != 0
+        let echo = flags & tcflag_t(ECHO) != 0
+        return canonical && !echo
+    }
+
+    /// How the pane's tty is reading input (`TerminalLineMode`), or nil when
+    /// it can't be read. Read from the tty `terminalIsReadingPassword` reads.
+    @MainActor
+    static func terminalLineMode(forPane pane: Pane) -> TerminalLineMode? {
+        localModes(ttyPath: lineDisciplineTTYPath(forPane: pane)).map(TerminalLineMode.init(localModes:))
+    }
+
+    /// Whether the pane's tty has left line mode (`ICANON` off): the program
+    /// reads keys one by one — a shell's line editor, a TUI, or ssh relaying
+    /// a session once its login went through. Unlike `terminalInputIsRaw`, a
+    /// password read (canonical, echo off) is not raw here. Read from the tty
+    /// `terminalIsReadingPassword` reads.
+    @MainActor
+    static func terminalIsNonCanonical(forPane pane: Pane) -> Bool {
+        guard let flags = localModes(ttyPath: lineDisciplineTTYPath(forPane: pane)) else { return false }
+        return flags & tcflag_t(ICANON) == 0
+    }
+
+    /// The tty whose line discipline the pane's programs read through: the
+    /// zmx daemon's pty for a wrapped pane (nil until it is cached, never the
+    /// attach client's permanently raw one), the surface's own otherwise.
+    @MainActor
+    private static func lineDisciplineTTYPath(forPane pane: Pane) -> String? {
+        let daemonTTY = ZmxForegroundResolver.daemonTTYPath(sessionName: pane.sessionName)
+        if daemonTTY == nil, pane.nsView?.isZmxWrapped == true { return nil }
+        return daemonTTY ?? pane.nsView?.ttyName
     }
 
     /// The current working directory of the pane's foreground process, read

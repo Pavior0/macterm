@@ -36,13 +36,13 @@ struct TabGlyph: View {
     var tint: Color?
 
     @AppStorage(Preferences.Keys.tabIconSymbol)
-    private var tabIconSymbol = "terminal"
+    private var tabIconSymbol: String
     @AppStorage(Preferences.Keys.showAgentIcons)
-    private var showAgentIcons = true
+    private var showAgentIcons: Bool
     @AppStorage(Preferences.Keys.showTabStatusIndicator)
-    private var showTabStatusIndicator = false
+    private var showTabStatusIndicator: Bool
     @AppStorage(Preferences.Keys.showSpinnerOverAgentIcons)
-    private var showSpinnerOverAgentIcons = true
+    private var showSpinnerOverAgentIcons: Bool
 
     private var symbol: String { symbolOverride ?? tabIconSymbol }
     private var agent: AgentIcon? { showAgentIcons ? tab.agentIcon : nil }
@@ -55,6 +55,7 @@ struct TabGlyph: View {
         if showTabStatusIndicator, !(symbol == Preferences.noIcon && tab.executionState == .idle && agent == nil) {
             TabStatusGlyph(
                 state: tab.executionState,
+                failed: tab.completionFailed,
                 symbol: symbol,
                 index: index,
                 agent: agent,
@@ -83,9 +84,15 @@ struct TabGlyph: View {
 ///   and it avoids the heavy, off-platform look of a checkmark glyph badge.
 ///   It overlays the agent logo the same way, regardless of the spinner
 ///   preference — "unread agent messages" is the signal #225 asked to keep.
+///   The dot is red instead of green when the run reported a failure (an
+///   OSC 9;4 ERROR); nothing else about it changes, and no progress
+///   percentage is ever drawn.
 /// - `idle`: the icon as-is.
 struct TabStatusGlyph: View {
     let state: TerminalExecutionState
+    /// Whether a `.done` state is a failure (`TerminalTab.completionFailed`).
+    /// Ignored in every other state.
+    var failed = false
     let symbol: String
     let index: Int
     var agent: AgentIcon?
@@ -94,10 +101,10 @@ struct TabStatusGlyph: View {
     var tint: Color?
     var spinnerOverAgent = true
     @AppStorage(Preferences.Keys.sidebarIconSize)
-    private var iconSizeRaw = SidebarIconSize.medium.rawValue
+    private var iconSize: SidebarIconSize
 
     private var size: SidebarIconSize {
-        SidebarIconSize(rawValue: iconSizeRaw) ?? .medium
+        iconSize
     }
 
     /// The spinner is a control, so it steps between AppKit's control sizes
@@ -144,12 +151,12 @@ struct TabStatusGlyph: View {
                         .frame(width: 7 * size.glyphScale, height: 7 * size.glyphScale)
                         .overlay(
                             Circle()
-                                .fill(MactermTheme.success)
+                                .fill(failed ? MactermTheme.failure : MactermTheme.success)
                                 .frame(width: 5 * size.glyphScale, height: 5 * size.glyphScale)
                         )
                         .offset(x: 2.5 * size.glyphScale, y: 2.5 * size.glyphScale)
                 }
-                .help("Done")
+                .help(failed ? "Failed" : "Done")
         case .idle:
             TabRowIcon(symbol: symbol, index: index, agent: agent, agentTint: tint)
                 .foregroundStyle(iconStyle)
@@ -189,14 +196,14 @@ struct TabRowIcon: View {
     /// (untagged) keeps the brand color.
     var agentTint: Color?
     @AppStorage(Preferences.Keys.sidebarIconSize)
-    private var iconSizeRaw = SidebarIconSize.medium.rawValue
+    private var iconSize: SidebarIconSize
     /// Scales with the user's text size like the sibling SF Symbols do; a
     /// fixed 15pt would stay small next to enlarged row text.
     @ScaledMetric(relativeTo: .body)
     private var agentIconSize: CGFloat = 15
 
     private var size: SidebarIconSize {
-        SidebarIconSize(rawValue: iconSizeRaw) ?? .medium
+        iconSize
     }
 
     var body: some View {

@@ -1,0 +1,450 @@
+import Foundation
+
+/// What a saved password is filed under: the command that asked for it plus
+/// the prompt line it printed. A command alone is not enough, because one
+/// command can ask more than once (`ssh -J bastion prod` asks for the
+/// bastion's password and then prod's); the prompt line tells them apart.
+///
+/// `command` is nil for a prompt that names its own secret regardless of who
+/// asks — a key passphrase belongs to the key file, not to `ssh prod` or
+/// `ssh-add` — and for a prompt the pane's own shell prints (`read -s`). Every
+/// other command is matched exactly as the process table reports it, except
+/// `sudo`, which is filed under the bare word: its password is the user's
+/// login password whatever it runs, so one entry covers every `sudo …`.
+///
+/// Those two shared entries answer whoever asks, so only a program the user's
+/// own processes can't replace is filed under them (`PasswordAsker
+/// .isProtected`): anything else named `sudo` — a `~/bin/sudo` earlier on
+/// PATH — or printing a passphrase prompt is filed under its own path, and is
+/// never offered the real sudo's password or the key's passphrase.
+///
+/// An empty `prompt` is an entry the user added for a command alone
+/// (`isOnDemandOnly`). Detection never reads an empty prompt line, so such an
+/// entry is never autofilled at a prompt; it is typed only when picked from
+/// the palette's Password Manager, where the user is the one naming it.
+struct PasswordEntryID: Hashable, Codable {
+    let command: String?
+    let prompt: String
+
+    /// The Keychain account string. Readable in Keychain Access, deterministic
+    /// for a lookup, and never parsed back — the entry's metadata is.
+    var account: String {
+        if prompt.isEmpty { return "\(command ?? "") — on demand" }
+        if let command { return "\(command) — \(prompt)" }
+        return prompt
+    }
+
+    /// Filled only from the palette, never offered at a prompt.
+    var isOnDemandOnly: Bool { prompt.isEmpty }
+
+    /// What a person reads as "which one": the command, or the prompt when
+    /// the entry is command-independent.
+    var title: String { displayCommand ?? prompt }
+
+    /// The command as shown: the process table reports the program the
+    /// command resolved to (`python3` runs `/opt/homebrew/…/Python`), so a
+    /// path in the program position is shortened to its name. Matching still
+    /// uses the exact `command`.
+    ///
+    /// An `ssh` loses the options Macterm's own ssh wrapper added
+    /// (`SSHWrapper.userArguments`): `ssh demo-box` typed at a shell runs as
+    /// `ssh -o SetEnv=TERM=… -o SendEnv=… demo-box`.
+    ///
+    /// A program named `sudo` keeps its path (`~`-abbreviated): the real sudo
+    /// is filed as the bare word, so a path here is some other program that
+    /// calls itself sudo, and the bubble must not let it pass for the real one.
+    var displayCommand: String? {
+        guard let command else { return nil }
+        let parts = command.split(separator: " ", maxSplits: 1)
+        guard let program = parts.first else { return command }
+        let path = String(program)
+        let name = path.contains("/") ? (path as NSString).lastPathComponent : path
+        if name == "sudo", path.contains("/") {
+            return (path as NSString).abbreviatingWithTildeInPath + (parts.count > 1 ? " \(parts[1])" : "")
+        }
+        guard parts.count > 1 else { return name }
+        var arguments = String(parts[1])
+        if name == "ssh" {
+            let words = arguments.split(separator: " ").map(String.init)
+            arguments = SSHWrapper.userArguments(fromExecArguments: words).joined(separator: " ")
+        }
+        return arguments.isEmpty ? name : "\(name) \(arguments)"
+    }
+}
+
+enum PasswordPromptIdentity {
+    /// Longest prompt line kept. A real prompt is one short line; anything
+    /// longer is output the program printed without a newline, and truncating
+    /// keeps a runaway line out of the Keychain.
+    static let maxPromptLength = 200
+
+    /// The prompt the program printed: the last non-empty line of the
+    /// viewport. At a password prompt the cursor sits at the end of that line
+    /// and nothing below it has been drawn yet — echo is off, so the typed
+    /// password never appears. Whitespace runs collapse so a re-rendered
+    /// prompt matches its earlier self.
+    static func promptLine(fromViewport text: String) -> String? {
+        let line = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .reversed()
+            .map { normalize(String($0)) }
+            .first { !$0.isEmpty }
+        guard let line else { return nil }
+        return String(line.prefix(maxPromptLength))
+    }
+
+    static func normalize(_ line: String) -> String {
+        line.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// The entry a prompt files under (see `PasswordEntryID`), or nil when
+    /// who is asking can't be told — such a prompt is neither autofilled nor
+    /// offered for saving, since it could be matched against any entry.
+    static func entryID(prompt: String, asker: PasswordAsker) -> PasswordEntryID? {
+        switch asker {
+        case .unknown:
+            return nil
+        case .shell:
+            return PasswordEntryID(command: nil, prompt: prompt)
+        case let .program(path, command, isProtected):
+            let command = normalize(command)
+            if isKeyPassphrase(prompt) {
+                // The key's own entry answers only a program that can't be
+                // swapped out; anything else keeps one entry per key of its own.
+                if isProtected { return PasswordEntryID(command: nil, prompt: prompt) }
+                return PasswordEntryID(command: path.isEmpty ? command : path, prompt: prompt)
+            }
+            if isProtected, (path as NSString).lastPathComponent == "sudo" {
+                return PasswordEntryID(command: "sudo", prompt: prompt)
+            }
+            return PasswordEntryID(command: command.isEmpty ? nil : command, prompt: prompt)
+        }
+    }
+
+    /// The entry a person declares in Settings → Password Manager → Details: the
+    /// command as typed, under the same collapsing rules, trusted because the
+    /// user wrote it — `sudo apt update` files as `sudo`, a passphrase prompt
+    /// drops its command, an empty command matches the prompt alone, and an
+    /// empty prompt makes an on-demand entry (`PasswordEntryID.isOnDemandOnly`).
+    static func declaredEntryID(prompt: String, command: String?) -> PasswordEntryID {
+        if isKeyPassphrase(prompt) {
+            return PasswordEntryID(command: nil, prompt: prompt)
+        }
+        guard let command = command.map(normalize), !command.isEmpty else {
+            return PasswordEntryID(command: nil, prompt: prompt)
+        }
+        if isSudo(command) {
+            return PasswordEntryID(command: "sudo", prompt: prompt)
+        }
+        return PasswordEntryID(command: command, prompt: prompt)
+    }
+
+    /// `ssh`/`ssh-add`/`ssh-keygen`: `Enter passphrase for key '/path':` and
+    /// `Enter passphrase for /path:`.
+    static func isKeyPassphrase(_ prompt: String) -> Bool {
+        prompt.range(of: #"^Enter passphrase for (key )?\S"#, options: .regularExpression) != nil
+    }
+
+    /// A prompt for a code that is only good once — a 2FA verification code,
+    /// an authenticator or hardware-token response. Saving one would autofill
+    /// a stale code next time, so no save is ever offered for these.
+    static func isOneTimeCode(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        return ["verification code", "one-time", "one time", "otp", "2fa", "two-factor", "authenticator", "token:", "passcode"]
+            .contains { lower.contains($0) }
+    }
+
+    static func isSudo(_ command: String) -> Bool {
+        let first = command.split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+        return (first as NSString).lastPathComponent == "sudo"
+    }
+
+    /// What a remote project's own pane is running when its ssh asks for a
+    /// password: Macterm's spawn wrapper is an implementation detail, so the
+    /// entry is filed under the connection it makes.
+    static func remoteCommand(user: String?, host: String) -> String {
+        if let user, !user.isEmpty { "ssh \(user)@\(host)" } else { "ssh \(host)" }
+    }
+}
+
+/// Who is reading a password, as far as the process table can vouch for it.
+enum PasswordAsker: Equatable {
+    /// A program. `path` is its executable's real path (`proc_pidpath`),
+    /// `command` that path plus its arguments — or, for a remote project's own
+    /// login, the connection it makes (`ssh user@host`). `isProtected`: the
+    /// executable and every directory above it belong to root and aren't
+    /// writable by the user (`ProcessInspector.isProtectedExecutable`), so no
+    /// process of the user's can have put it there or changed it.
+    case program(path: String, command: String, isProtected: Bool)
+    /// The pane's own idle shell, reading with a builtin (`read -s`).
+    case shell
+    /// The foreground couldn't be read.
+    case unknown
+}
+
+/// How a pane's tty is reading input right now, from its local modes
+/// (`ProcessInspector.terminalLineMode`).
+enum TerminalLineMode: Equatable {
+    /// Canonical with echo off: a password read.
+    case password
+    /// Canonical with echo on: whatever is typed is drawn on screen and, at a
+    /// shell, ends up in its history.
+    case echoing
+    /// Not in line mode: a shell's line editor, a TUI, or ssh relaying a
+    /// remote session — whose own tty Macterm can't see.
+    case raw
+
+    init(localModes flags: tcflag_t) {
+        let canonical = flags & tcflag_t(ICANON) != 0
+        let echo = flags & tcflag_t(ECHO) != 0
+        self = canonical ? (echo ? .echoing : .password) : .raw
+    }
+}
+
+/// What typing a password picked from the palette does to a pane, decided
+/// by the pane's tty (`TerminalLineMode`; nil when it can't be read). The
+/// user named the entry, so no prompt has to match and nothing is asked.
+/// Return follows only at a verified password read: anywhere else — ssh or
+/// tmux relaying a remote prompt, a shell's line editor, a line that echoes —
+/// the password is left typed for the user to submit, so a wrong pick never
+/// runs as a command or lands in a history; a remote `sudo` costs one Return.
+struct OnDemandPasswordFill: Equatable {
+    /// The tty is at a password read: ⌃U (the line discipline's kill)
+    /// clears a half-typed line first, Return follows, the fill is judged
+    /// like an autofill, and it must still find that read after
+    /// authentication.
+    let isVerified: Bool
+
+    init(mode: TerminalLineMode?) {
+        isVerified = mode == .password
+    }
+}
+
+/// One key as the password prompt's line discipline will see it. Built from
+/// the key event before it reaches libghostty (`GhosttyTerminalNSView`), and
+/// from a paste's resolved text.
+enum PasswordKeyInput: Equatable {
+    case text(String)
+    case backspace
+    /// ⌃U — the tty's VKILL: erase the whole line.
+    case killLine
+    /// ⌃W — VWERASE: erase back over one word.
+    case killWord
+    case submit
+    /// ⌃C / ⌃D: the program abandons the read.
+    case cancel
+    /// Escape. Like `unknown` for the line (the tty inserts it literally),
+    /// kept distinct so a visible bubble can take it as Dismiss.
+    case escape
+    /// A key whose effect on the line can't be mirrored (arrows, escape,
+    /// forward-delete, other control chords). The capture can no longer vouch
+    /// for what the program received, so it will not offer to save it.
+    case unknown
+
+    /// Ends the line a read is collecting: Return, or text carrying a newline
+    /// (a paste).
+    var endsLine: Bool {
+        switch self {
+        case .submit: true
+        case let .text(text): text.contains(where: \.isNewline)
+        default: false
+        }
+    }
+}
+
+/// Mirrors the canonical-mode line editing a password read goes through, so
+/// the captured text is what the program received rather than the raw key
+/// sequence. The defaults every macOS and Linux tty ships with: DEL/⌃H erase
+/// a character, ⌃U the line, ⌃W a word; Return ends the line.
+struct PasswordLineCapture: Equatable {
+    enum Outcome: Equatable {
+        case editing
+        case submitted(String)
+        case cancelled
+    }
+
+    private(set) var buffer = ""
+    /// Set once a key the capture can't mirror was typed.
+    private(set) var isTainted = false
+
+    mutating func apply(_ input: PasswordKeyInput) -> Outcome {
+        switch input {
+        case let .text(text):
+            // A paste may carry its own line end; everything up to it is the
+            // password, and the newline submits it.
+            if let newline = text.firstIndex(where: \.isNewline) {
+                buffer += text[..<newline]
+                return submit()
+            }
+            buffer += text
+        case .backspace:
+            if !buffer.isEmpty { buffer.removeLast() }
+        case .killLine:
+            buffer = ""
+        case .killWord:
+            while buffer.last?.isWhitespace == true {
+                buffer.removeLast()
+            }
+            while let last = buffer.last, !last.isWhitespace {
+                buffer.removeLast()
+            }
+        case .submit:
+            return submit()
+        case .cancel:
+            buffer = ""
+            return .cancelled
+        case .unknown,
+             .escape:
+            isTainted = true
+        }
+        return .editing
+    }
+
+    private mutating func submit() -> Outcome {
+        let typed = buffer
+        buffer = ""
+        // A tainted or empty line is still submitted — the program received
+        // it — but there is nothing trustworthy to offer.
+        return .submitted(isTainted ? "" : typed)
+    }
+}
+
+/// Decides, after a password was submitted, whether it worked. A rejection
+/// is visible: every program prints one ("Permission denied, please try
+/// again.", "Sorry, try again.") right after the prompt. Success is mostly
+/// its absence, so the rules below call success only on positive evidence —
+/// the read ended and something else happened — and give up rather than
+/// guess once `timeout` passes.
+///
+/// Two things deliberately are NOT evidence of a rejection. The command's
+/// exit code: it judges the command, not the password (`sudo grep -q`,
+/// `sudo test -f`, `ssh host cmd` exit nonzero with the password accepted).
+/// And the identical prompt appearing again without a failure line: git over
+/// HTTPS asks the same `Password for 'https://…':` once per connection, and
+/// a push opens two, so the repeat is the next read, not a retry.
+struct PasswordSubmissionJudge {
+    enum Verdict: Equatable {
+        case pending
+        case succeeded
+        case failed
+        /// No evidence either way in time. Nothing is saved.
+        case undetermined
+    }
+
+    /// Echo stays off for a moment after Return while the program reads the
+    /// line; a prompt still showing inside this window is the same read.
+    static let settleDelay: TimeInterval = 0.3
+    static let timeout: TimeInterval = 12
+
+    /// How many lines after the prompt a failure message is looked for. Every
+    /// program prints its rejection on the line right after the prompt; a
+    /// banner or MOTD further down that happens to say "denied" is not one.
+    static let failureWindow = 3
+
+    /// Lowercased substrings of the lines auth failures print: ssh
+    /// ("Permission denied, please try again."), sudo ("Sorry, try again.",
+    /// "incorrect password attempts"), su, login, psql/mysql, gpg and friends.
+    static let failureMarkers = [
+        "denied",
+        "incorrect",
+        "try again",
+        "authentication fail",
+        "authentication error",
+        "invalid password",
+        "wrong password",
+        "bad password",
+        "login failed",
+        "bad passphrase",
+        "connection closed",
+        "connection reset",
+    ]
+
+    let submittedPrompt: String
+    let submittedAt: Date
+
+    struct Observation {
+        let now: Date
+        /// The pane's tty is at a password read right now.
+        let atPasswordPrompt: Bool
+        /// The prompt line showing now (meaningful when `atPasswordPrompt`).
+        let currentPrompt: String?
+        /// Non-empty lines drawn below the submitted prompt since Return.
+        let outputAfterPrompt: [String]
+        /// The exit code shell integration reported for the command, if the
+        /// command has finished (OSC 133;D).
+        let exitCode: Int32?
+        /// The tty has left line mode (`ICANON` off): the program is reading
+        /// keys one at a time now.
+        var inputIsNonCanonical = false
+    }
+
+    func evaluate(_ o: Observation) -> Verdict {
+        let elapsed = o.now.timeIntervalSince(submittedAt)
+        if Self.containsFailure(o.outputAfterPrompt) { return .failed }
+        // A prompt up again past the settle window is the next read — the
+        // next hop's password, or the same question asked afresh — and the
+        // previous one was accepted, since no rejection was printed.
+        if o.atPasswordPrompt, elapsed >= Self.settleDelay { return .succeeded }
+        // The command ended without printing a rejection: the read was
+        // accepted, whatever the command then made of its work.
+        if let code = o.exitCode, code >= 0 { return .succeeded }
+        if !o.atPasswordPrompt, elapsed >= Self.settleDelay, !o.outputAfterPrompt.isEmpty {
+            return .succeeded
+        }
+        // The tty left line mode with no rejection printed: the program went
+        // on to read keys itself — ssh relaying the session it just logged
+        // in to, which no program does to ask again. A remote project's pane
+        // has only this: its login ends in zmx repainting the screen from the
+        // top, so nothing is ever drawn below the prompt.
+        if !o.atPasswordPrompt, elapsed >= Self.settleDelay, o.inputIsNonCanonical {
+            return .succeeded
+        }
+        return elapsed >= Self.timeout ? .undetermined : .pending
+    }
+
+    /// The verdict as of now, without waiting out the settle window — for
+    /// when the user has started typing at a prompt, which says the read this
+    /// submission fed is over.
+    func settle(_ o: Observation) -> Verdict {
+        let forced = Observation(
+            now: max(o.now, submittedAt.addingTimeInterval(Self.settleDelay)),
+            atPasswordPrompt: o.atPasswordPrompt,
+            currentPrompt: o.currentPrompt,
+            outputAfterPrompt: o.outputAfterPrompt,
+            exitCode: o.exitCode,
+            inputIsNonCanonical: o.inputIsNonCanonical
+        )
+        let verdict = evaluate(forced)
+        return verdict == .pending ? .succeeded : verdict
+    }
+
+    static func containsFailure(_ lines: [String]) -> Bool {
+        lines.prefix(failureWindow).contains { line in
+            let lower = line.lowercased()
+            return failureMarkers.contains { lower.contains($0) }
+        }
+    }
+
+    /// Where a transcript (the screen with its scrollback) ends right now:
+    /// one past its last non-empty line. Taken at Return, it marks the
+    /// submission; what the program prints lands after it. Non-empty rather
+    /// than the raw count, because the viewport pads with blank rows that
+    /// output fills in without the count changing.
+    static func transcriptEnd(_ text: String) -> Int {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let last = lines.lastIndex(where: { !$0.allSatisfy(\.isWhitespace) }) else { return 0 }
+        return last + 1
+    }
+
+    /// The non-empty lines the transcript gained since `end`
+    /// (`transcriptEnd` at submission). Searching for the prompt line instead
+    /// would be wrong exactly when it matters: a rejection re-prompts with the
+    /// same line, and "after its last occurrence" is then nothing at all.
+    static func output(since end: Int, in text: String) -> [String] {
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { PasswordPromptIdentity.normalize(String($0)) }
+        guard end < lines.count else { return [] }
+        return lines[end...].filter { !$0.isEmpty }
+    }
+}

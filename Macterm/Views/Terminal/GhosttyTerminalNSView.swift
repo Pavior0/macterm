@@ -205,11 +205,11 @@ final class GhosttyTerminalNSView: NSView {
         }
     }
 
-    func surfaceDidReportProgress(running: Bool) {
-        if running {
-            onProgressStarted?()
-        } else {
-            onProgressFinished?()
+    func surfaceDidReportProgress(_ report: TerminalProgressReport) {
+        switch report {
+        case .running: onProgressStarted?()
+        case .ended: onProgressFinished?(false)
+        case .failed: onProgressFinished?(true)
         }
     }
 
@@ -360,6 +360,7 @@ final class GhosttyTerminalNSView: NSView {
     /// Unlike key-code inference, this distinguishes real content from an
     /// empty/whitespace clipboard or a remapped Command-V binding.
     func surfaceDidPasteText(_ text: String) {
+        PasswordPromptMonitor.shared.viewDidPaste(self, text: text)
         recordCommandInput(text)
         if TerminalCommandSubmission.textContainsNewline(text),
            TerminalCommandSubmission.textContainsContent(text)
@@ -414,7 +415,9 @@ final class GhosttyTerminalNSView: NSView {
     var onBell: (() -> Void)?
     var onCommandFinished: ((Int16, UInt64) -> Void)?
     var onProgressStarted: (() -> Void)?
-    var onProgressFinished: (() -> Void)?
+    /// A progress report ended the run (`TerminalProgressReport`). The Bool is
+    /// whether it failed: true for ERROR, false for REMOVE and PAUSE.
+    var onProgressFinished: ((Bool) -> Void)?
     var onTerminalRender: (() -> Void)?
     var onBackgroundColorChange: ((NSColor) -> Void)?
     var onAdaptiveBackgroundChange: ((NSColor?) -> Void)?
@@ -430,6 +433,11 @@ final class GhosttyTerminalNSView: NSView {
     /// The link URL under the mouse (`GHOSTTY_ACTION_MOUSE_OVER_LINK`), nil
     /// when the pointer leaves it. Drives the pane's hover-URL banner.
     var onLinkHover: ((String?) -> Void)?
+    /// A clicked link (`GHOSTTY_ACTION_OPEN_URL` from the link regex), given
+    /// first refusal: true means it was handled — a local file opened in its
+    /// default app or the user's editor (`AppState.openClickedLink`) — and
+    /// false sends it to the system opener as before.
+    var onOpenLink: ((String) -> Bool)?
     /// The pointer cursor libghostty wants over the grid
     /// (`GHOSTTY_ACTION_MOUSE_SHAPE`) — I-beam over text, a pointing hand
     /// over links. The hosting `SurfaceScrollView` applies it as its
@@ -454,18 +462,37 @@ final class GhosttyTerminalNSView: NSView {
     var currentPwd: String?
 
     /// True while libghostty reports the surface is at a password prompt
-    /// (surface-target `GHOSTTY_ACTION_SECURE_INPUT`). Registers this view
-    /// with the `SecureInput` manager so keystrokes are shielded from event
-    /// taps exactly while the prompt is focused.
+    /// (surface-target `GHOSTTY_ACTION_SECURE_INPUT`). libghostty reads its
+    /// own pty, which under zmx is the attach client's and never at a prompt,
+    /// so for a wrapped pane this stays false and `detectedPasswordInput`
+    /// carries the prompt instead.
     var passwordInput: Bool = false {
-        didSet {
-            guard passwordInput != oldValue else { return }
-            let id = ObjectIdentifier(self)
-            if passwordInput {
-                SecureInput.shared.setScoped(id, focused: hasKeyboardFocus)
-            } else {
-                SecureInput.shared.removeScoped(id)
-            }
+        didSet { syncSecureInputScope() }
+    }
+
+    /// True while Macterm's own read of the pane's real tty finds a password
+    /// prompt (`PasswordPromptMonitor`, honoring `macos-auto-secure-input`).
+    var detectedPasswordInput: Bool = false {
+        didSet { syncSecureInputScope() }
+    }
+
+    /// The pane this view belongs to, for the password monitor (which starts
+    /// from the focused view and needs the pane's session and command).
+    weak var owningPane: Pane?
+
+    /// Whether this view is registered with the `SecureInput` manager, which
+    /// shields keystrokes from event taps while a focused prompt is showing.
+    private var secureInputScoped = false
+
+    private func syncSecureInputScope() {
+        let wanted = passwordInput || detectedPasswordInput
+        guard wanted != secureInputScoped else { return }
+        secureInputScoped = wanted
+        let id = ObjectIdentifier(self)
+        if wanted {
+            SecureInput.shared.setScoped(id, focused: hasKeyboardFocus)
+        } else {
+            SecureInput.shared.removeScoped(id)
         }
     }
 
@@ -623,10 +650,16 @@ final class GhosttyTerminalNSView: NSView {
             // untouched instead of being coerced relative to the app's cwd.
             config.working_directory = cString(ProjectPath.normalizedForStorage(workingDirectory))
 
-            // Shell binary → the surface's program. nil falls back to libghostty's
-            // own resolution (which honors the user's ghostty config / login shell).
-            if let resolvedShell = shell ?? GhosttyApp.shared.configuredShell {
-                config.command = cString(resolvedShell)
+            // Shell binary → the surface's program. nil leaves it to libghostty,
+            // which applies the user's ghostty `command =` and otherwise the
+            // login shell from the password database. Deliberately never
+            // `$SHELL`: that is the shell of whatever launched the app (often
+            // `/bin/zsh` via launchd), not the user's, and using it once forced
+            // every pane onto zsh. (Macterm cannot read `command` off the C
+            // config itself — its Zig type is a union the getter refuses — nor
+            // does it need to: this is where libghostty honors it.)
+            if let shell {
+                config.command = cString(shell)
             }
         }
 
@@ -746,11 +779,14 @@ final class GhosttyTerminalNSView: NSView {
     /// unzoom can animate it back without a remount, so the window's own
     /// occlusion says "visible"; this override lets the renderer sleep the
     /// way an orphaned pane does. `rendersForPreview` still wins — the tab
-    /// switcher samples zoomed-away panes too.
+    /// switcher samples zoomed-away panes too. The adaptive chrome is told as
+    /// well, since a hidden pane must stop cutting the window tint
+    /// (`AdaptiveTerminalChrome.layoutVisibilityDidChange`).
     var hiddenInLayout = false {
         didSet {
             guard oldValue != hiddenInLayout else { return }
             syncOcclusion()
+            AdaptiveTerminalChrome.shared.layoutVisibilityDidChange(self)
         }
     }
 
@@ -775,6 +811,7 @@ final class GhosttyTerminalNSView: NSView {
 
     func destroySurface() {
         isDestroyed = true
+        cancelRowSnap()
         clearCommandSubmissionEvidence()
         // A composition in flight has nowhere left to commit — drop it before
         // the surface goes, so a reattached surface starts uncomposed rather
@@ -829,6 +866,8 @@ final class GhosttyTerminalNSView: NSView {
         windowObservers.removeAll()
 
         guard let window else {
+            // A settle's link would never fire again without a window.
+            cancelRowSnap()
             // Detached from its window (e.g. pulled out of the incubator before
             // re-attaching). Mark occluded so the renderer doesn't draw to an
             // off-screen layer.
@@ -841,10 +880,7 @@ final class GhosttyTerminalNSView: NSView {
             // Reconnect existing surface to the new window
             let scale = Double(window.backingScaleFactor)
             ghostty_surface_set_content_scale(surface, scale, scale)
-            let size = convertToBacking(bounds).size
-            if size.width > 0, size.height > 0 {
-                ghostty_surface_set_size(surface, UInt32(size.width), UInt32(size.height))
-            }
+            applySurfaceSize(convertToBacking(bounds).size)
             ghostty_surface_set_focus(surface, isFocused)
         }
         updateMetalLayerSize()
@@ -919,7 +955,32 @@ final class GhosttyTerminalNSView: NSView {
             CATransaction.commit()
         }
         ghostty_surface_set_content_scale(surface, scale, scale)
-        ghostty_surface_set_size(surface, UInt32(scaledSize.width), UInt32(scaledSize.height))
+        applySurfaceSize(scaledSize)
+    }
+
+    /// The one path to `ghostty_surface_set_size`. A size that would leave
+    /// the grid degenerate is refused (see `SurfaceSizeGate`): libghostty
+    /// reflows scrollback into whatever grid it is given, and a two-column
+    /// grid — a split animation's first frame, a window shrunk to the
+    /// sidebar's width, a container collapsing mid tab switch — shreds every
+    /// line and leaves the content above the viewport when the pane grows
+    /// back. Keeping the last grid renders the pane clipped for as long as
+    /// it is that small, with its content intact.
+    private func applySurfaceSize(_ backingSize: CGSize) {
+        guard let surface else { return }
+        let widthPx = UInt32(backingSize.width)
+        let heightPx = UInt32(backingSize.height)
+        let cells = ghostty_surface_size(surface)
+        guard SurfaceSizeGate.admits(
+            widthPx: widthPx, heightPx: heightPx,
+            cellWidthPx: cells.cell_width_px, cellHeightPx: cells.cell_height_px
+        )
+        else {
+            let size = "\(widthPx)x\(heightPx)"
+            logger.debug("refusing degenerate surface size \(size, privacy: .public)px for \(self.sessionName, privacy: .public)")
+            return
+        }
+        ghostty_surface_set_size(surface, widthPx, heightPx)
         if !hasReportedSurfaceSize {
             hasReportedSurfaceSize = true
             onSurfaceSized?()
@@ -933,14 +994,20 @@ final class GhosttyTerminalNSView: NSView {
 
     private func isAppShortcut(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
-        // Always let system Cmd shortcuts through
-        if flags == .command, Self.systemKeys.contains(key) { return true }
+        // Always let system Cmd shortcuts through. Named by `eventToken`, not
+        // the typed character: under a Cyrillic layout ⌘Q types `й`, and
+        // `performKeyEquivalent` hands libghostty that key's Command-map `q`,
+        // so without this ghostty's own `super+q=quit` — an action Macterm
+        // leaves unhandled — would swallow Quit.
+        if flags == .command, let token = HotkeyRegistry.eventToken(event), Self.systemKeys.contains(token) {
+            return true
+        }
         // Cmd+1-9 for tab selection. A backstop only: KeyRouter's monitor
         // sees these first and swallows them. Cmd+0 is deliberately absent —
         // it addresses a tab only as the second digit of a multi-digit run
         // (TabIndexChord), which the monitor has already handled; on its own
         // it belongs to ghostty as reset-font-size.
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
         if flags == .command, let n = Int(key), (1 ... 9).contains(n) { return true }
         // A binding the user flagged for passthrough is NOT an app shortcut
         // while a program owns this pane's keyboard — otherwise the key would
@@ -950,6 +1017,9 @@ final class GhosttyTerminalNSView: NSView {
         if yieldsToProgram?(event) == true { return false }
         // Check all configurable hotkey actions
         if HotkeyAction.allCases.contains(where: { HotkeyRegistry.matches(event, action: $0) }) { return true }
+        // And the custom palettes' chords (`PaletteHotkeys`), the same
+        // answer `MainAppResponder` gives.
+        if PaletteHotkeys.shared.matchingPaletteID(for: event) != nil { return true }
         return false
     }
 
@@ -1010,7 +1080,7 @@ final class GhosttyTerminalNSView: NSView {
     /// keyboard focus — a prompt sitting in a background pane must not shield
     /// (and so break) typing that's going elsewhere.
     private func syncSecureInputFocus(_ focused: Bool) {
-        guard passwordInput else { return }
+        guard secureInputScoped else { return }
         SecureInput.shared.setScoped(ObjectIdentifier(self), focused: focused)
     }
 
@@ -1020,9 +1090,13 @@ final class GhosttyTerminalNSView: NSView {
 
     private func setupTrackingArea() {
         if let existing = currentTrackingArea { removeTrackingArea(existing) }
+        // `.activeAlways`, as in Ghostty.app: a program reporting the mouse
+        // still hears it move, and links still highlight, in a window that
+        // isn't key. What covers the pane is filtered per event instead
+        // (`ownsPointer`).
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self
         )
         addTrackingArea(area)
@@ -1083,6 +1157,11 @@ final class GhosttyTerminalNSView: NSView {
         guard let surface else { super.keyDown(with: event)
             return
         }
+        // A Return or Escape the password bubble answers is consumed here and
+        // never reaches libghostty. Everything else is reported to the
+        // password monitor at the point it is actually sent, below, as the
+        // text the tty will receive — not `event.characters`.
+        if PasswordPromptMonitor.shared.viewWillSendKey(self, event: event) { return }
         let action: ghostty_input_action_e = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         // What zmx will count as user input: a key that reaches the pty. Cmd
@@ -1110,6 +1189,11 @@ final class GhosttyTerminalNSView: NSView {
             // keystroke — leave it alone. SIGQUIT stays reachable via `kill
             // -QUIT` for the rare intentional case.
             if event.keyCode == 42, !flags.contains(.shift) { return }
+            // Past the swallow and the shortcut check: this chord reaches
+            // the tty, so the password capture sees it.
+            if let input = PasswordKeyInput.from(event) {
+                PasswordPromptMonitor.shared.viewDidType(self, input: input)
+            }
             var ke = buildKeyEvent(from: event, action: action)
             let text = event.charactersIgnoringModifiers ?? event.characters ?? ""
             if text.isEmpty {
@@ -1190,6 +1274,27 @@ final class GhosttyTerminalNSView: NSView {
             forwarded = true
         }
 
+        // What the password capture sees is what went to the tty: the IME's
+        // committed text rather than the keystroke's raw characters, nothing
+        // while a composition is open (the romaji never reach the program),
+        // and nothing legible for an Option chord libghostty encodes as
+        // ESC+key (option-as-alt strips Option from the translation flags).
+        if let input = PasswordKeyInput.from(event) {
+            let typed: PasswordKeyInput = switch input {
+            case .text where hadMarkedText || hasMarkedText():
+                .unknown
+            case .text where !keyTextAccumulator.isEmpty:
+                .text(keyTextAccumulator.joined())
+            case .text where flags.contains(.option) && !translationEvent.modifierFlags.contains(.option):
+                .unknown
+            case .text:
+                filterSpecial(event.characters ?? "").isEmpty ? .unknown : .text(filterSpecial(event.characters ?? ""))
+            default:
+                input
+            }
+            PasswordPromptMonitor.shared.viewDidType(self, input: typed)
+        }
+
         let userModifiers: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
         if forwarded,
            TerminalCommandSubmission.isReturn(
@@ -1244,12 +1349,23 @@ final class GhosttyTerminalNSView: NSView {
             clearCommandSubmissionEvidence()
         }
         var ke = buildKeyEvent(from: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS)
-        ke.text = nil
-        if ghostty_surface_key_is_binding(surface, ke, nil) {
+        func performIfBinding(_ ke: ghostty_input_key_s) -> Bool {
+            guard ghostty_surface_key_is_binding(surface, ke, nil) else { return false }
             _ = ghostty_surface_key(surface, ke)
             return true
         }
-        return false
+        // libghostty resolves a unicode binding (`super+c`) from the key's text
+        // before its unshifted codepoint, and under a Cyrillic layout the C
+        // key's unshifted codepoint is `с` — so with no text, ⌘C and ⌘V matched
+        // nothing. The layout's Command-map letter goes in as the text — the
+        // letter Ghostty.app gets by sending `event.characters` — and the check
+        // and the dispatch must both carry it. It types nothing: ghostty never
+        // encodes text for super on macOS.
+        guard let text = HotkeyRegistry.commandKeyCharacter(for: event) else { return performIfBinding(ke) }
+        return text.withCString { ptr in
+            ke.text = ptr
+            return performIfBinding(ke)
+        }
     }
 
     // MARK: - Mouse
@@ -1271,38 +1387,90 @@ final class GhosttyTerminalNSView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        // A force click's stages belong to the press it rode on.
+        prevPressureStage = 0
         guard let surface else { return }
         let pt = mousePoint(from: event)
         ghostty_surface_mouse_pos(surface, pt.x, pt.y, mods(event))
         _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods(event))
+        ghostty_surface_mouse_pressure(surface, 0, 0)
     }
 
+    /// A drag belongs to the view the press went to wherever the pointer goes
+    /// — over the sidebar, out of the window — so it reports unfiltered.
     override func mouseDragged(with event: NSEvent) {
-        mouseMoved(with: event)
+        sendMousePos(event)
     }
 
     override func rightMouseDragged(with event: NSEvent) {
-        mouseMoved(with: event)
+        sendMousePos(event)
     }
 
     override func otherMouseDragged(with event: NSEvent) {
-        mouseMoved(with: event)
+        sendMousePos(event)
     }
 
     override func mouseMoved(with event: NSEvent) {
+        guard ownsPointer(event) else { return }
+        sendMousePos(event)
+        focusFollowingMouse()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        // Undoes the exit's "outside the viewport" below: mouse reporting and
+        // link hover both read the position libghostty last heard.
+        guard ownsPointer(event) else { return }
+        sendMousePos(event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        // A drag that leaves keeps reporting through `mouseDragged`.
+        guard NSEvent.pressedMouseButtons == 0, let surface else { return }
+        // Negative coordinates are libghostty's "the pointer left": it drops
+        // the hovered link (underline, banner, pointing hand) with them.
+        ghostty_surface_mouse_pos(surface, -1, -1, mods(event))
+    }
+
+    private func sendMousePos(_ event: NSEvent) {
         guard let surface else { return }
         let pt = mousePoint(from: event)
         ghostty_surface_mouse_pos(surface, pt.x, pt.y, mods(event))
+    }
+
+    /// Whether the pointer is over this view rather than over something
+    /// covering it. The tracking area fires by geometry alone, and what sits
+    /// on a pane — a locked desktop widget's shield, a split's resize band —
+    /// owns the pointer where it is; a shielded widget's program must not hear
+    /// the pointer move any more than it hears a click.
+    private func ownsPointer(_ event: NSEvent) -> Bool {
+        guard let hit = window?.contentView?.hitTest(event.locationInWindow) else { return false }
+        return hit === self || hit.isDescendant(of: self)
+    }
+
+    /// Ghostty's `focus-follows-mouse`: the pointer moving over a pane of the
+    /// key window focuses it, as a click would. Only focus held by another
+    /// pane moves — the palette, the search bar or a rename field keeps it,
+    /// which is Ghostty.app's command-palette exception generalized.
+    private func focusFollowingMouse() {
+        guard let window, window.isKeyWindow, !hasKeyboardFocus,
+              window.firstResponder is GhosttyTerminalNSView,
+              GhosttyApp.shared.focusFollowsMouse
+        else { return }
+        window.makeFirstResponder(self)
     }
 
     override func rightMouseDown(with event: NSEvent) {
         onInteraction?()
-        guard let surface else { return }
+        guard let surface else { return super.rightMouseDown(with: event) }
         let pt = mousePoint(from: event)
         ghostty_surface_mouse_pos(surface, pt.x, pt.y, mods(event))
-        if !ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, mods(event)) {
-            presentContextMenu(with: event)
+        if ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, mods(event)) {
+            return
         }
+        // Not consumed: AppKit's own right-click handling asks `menu(for:)`.
+        super.rightMouseDown(with: event)
     }
 
     override func rightMouseUp(with event: NSEvent) {
@@ -1333,6 +1501,49 @@ final class GhosttyTerminalNSView: NSView {
             Self.mouseButton(fromNSEventButtonNumber: event.buttonNumber),
             mods(event)
         )
+    }
+
+    // MARK: - Force click
+
+    /// The force-click stage the current press has reached; reset on release.
+    private var prevPressureStage = 0
+
+    override func pressureChange(with event: NSEvent) {
+        guard let surface else { return }
+        // libghostty first: a deep press under a held left button selects the
+        // word there, and Look Up reads the state it sets.
+        ghostty_surface_mouse_pressure(surface, UInt32(event.stage), Double(event.pressure))
+        // Look Up once per press, on the move into stage 2 (the force click).
+        guard prevPressureStage < 2 else { return }
+        prevPressureStage = event.stage
+        guard event.stage == 2, Self.forceClickLooksUp else { return }
+        quickLook(with: event)
+    }
+
+    /// System Settings → Trackpad → "Force Click and haptic feedback". There
+    /// is no API for it; Ghostty.app reads the same global key.
+    private static var forceClickLooksUp: Bool {
+        CFPreferencesGetAppBooleanValue("com.apple.trackpad.forceClick" as CFString, kCFPreferencesAnyApplication, nil)
+    }
+
+    /// Look Up (force click, ⌃⌘D, a three-finger tap): the dictionary popover
+    /// for the word under the pointer, drawn in the terminal's font.
+    override func quickLook(with event: NSEvent) {
+        guard let surface else { return super.quickLook(with: event) }
+        var text = ghostty_text_s()
+        guard ghostty_surface_quicklook_word(surface, &text) else { return super.quickLook(with: event) }
+        defer { ghostty_surface_free_text(surface, &text) }
+        guard text.text_len > 0 else { return super.quickLook(with: event) }
+        var attributes: [NSAttributedString.Key: Any] = [:]
+        if let fontRaw = ghostty_surface_quicklook_font(surface) {
+            // A +1 copy: the dictionary keeps its own reference.
+            let font = Unmanaged<CTFont>.fromOpaque(fontRaw)
+            attributes[.font] = font.takeUnretainedValue()
+            font.release()
+        }
+        // libghostty's origin is top-left, AppKit's bottom-left.
+        let origin = NSPoint(x: text.tl_px_x, y: bounds.height - text.tl_px_y)
+        showDefinition(for: NSAttributedString(string: String(cString: text.text), attributes: attributes), at: origin)
     }
 
     /// NSEvent.buttonNumber → libghostty button, mirroring the Ghostty mac
@@ -1370,7 +1581,154 @@ final class GhosttyTerminalNSView: NSView {
             x *= 2
             y *= 2
         }
+        // Any scroll — a new touch included — takes over from a settle.
+        cancelRowSnap()
+        noteScroll(y: y, precise: event.hasPreciseScrollingDeltas)
         ghostty_surface_mouse_scroll(surface, x, y, scrollMods(for: event))
+        scheduleRowSnapIfGestureEnded(event)
+    }
+
+    // MARK: - Sub-row scroll offset (smooth scrolling)
+
+    /// Mirror of the core's scroll accumulator — see `ScrollAccumulator`.
+    private var scrollAccumulator = ScrollAccumulator()
+
+    /// Cell height in backing pixels: the units the core accumulates in.
+    private var cellHeightPixels: CGFloat {
+        guard let surface else { return 0 }
+        return CGFloat(ghostty_surface_size(surface).cell_height_px)
+    }
+
+    /// Record a delta we are about to hand the core, converted to the pixels
+    /// it will add to its accumulator (`Surface.scrollCallback`'s
+    /// `yoff_adjusted`). Discrete ticks are normalized to cells first, and on
+    /// macOS to at least one, exactly as the core does.
+    private func noteScroll(y: CGFloat, precise: Bool) {
+        let cell = cellHeightPixels
+        guard cell > 0 else { return }
+        let multiplier = GhosttyApp.shared.mouseScrollMultiplier
+        let pixels: CGFloat = if precise {
+            y * CGFloat(multiplier.precision)
+        } else {
+            (y > 0 ? max(y, 1) : min(y, -1)) * cell * CGFloat(multiplier.discrete)
+        }
+        scrollAccumulator.advance(pixels: pixels, cellHeight: cell)
+    }
+
+    /// Put the viewport `points` below its row-aligned position, which is
+    /// what draws a scroller drag between rows.
+    ///
+    /// libghostty publishes a sub-row viewport offset only from a precision
+    /// scroll, and any row-level move (the `scroll_to_row` a drag sends)
+    /// clears it — so a drag is row-quantized however smooth the wheel is.
+    /// This hands the core a precision delta sized to land its accumulator
+    /// on exactly the offset we want (`ScrollAccumulator.nudge`), which
+    /// publishes the offset and, being under a cell, commits no row of its
+    /// own. Only meaningful with the user's `smooth-scroll` on; without it
+    /// the core keeps the remainder as an accumulator detail and draws
+    /// nothing differently.
+    func applySubRowScrollOffset(pointsBelowRow points: CGFloat) {
+        cancelRowSnap()
+        let cell = cellHeightPixels
+        guard cell > 0 else { return }
+        let scale = window?.backingScaleFactor ?? 2.0
+        // The core's sign: positive is content moved down (scrolled back), so
+        // a viewport sitting below its row is a negative remainder.
+        aimScrollRemainder(at: max(-cell + 1, min(0, -points * scale)))
+    }
+
+    /// Hand the core the precision delta that lands its accumulator on
+    /// `remainder` (`ScrollAccumulator.nudge`). Within a cell of zero it
+    /// commits no row; aimed past one, it commits the rows on the way.
+    private func aimScrollRemainder(at remainder: CGFloat) {
+        guard let surface else { return }
+        let cell = cellHeightPixels
+        guard cell > 0 else { return }
+        let multiplier = GhosttyApp.shared.mouseScrollMultiplier.precision
+        let delta = scrollAccumulator.nudge(toward: remainder, multiplier: multiplier)
+        guard delta != 0 else { return }
+        scrollAccumulator.advance(pixels: delta * CGFloat(multiplier), cellHeight: cell)
+        // Precision, no momentum: mods bit 0 is `precision` (`scrollMods`).
+        ghostty_surface_mouse_scroll(surface, 0, delta, 1)
+    }
+
+    // MARK: - Snap to whole row (smooth scrolling)
+
+    /// How long a lifted gesture waits for momentum before it settles.
+    /// AppKit's first momentum event follows the lift within a frame or two;
+    /// settling before it arrives would start a snap the flick then cancels.
+    private static let momentumGrace: Duration = .milliseconds(60)
+
+    private var rowSnapWait: Task<Void, Never>?
+    private var rowSnap: RowSnap?
+    private var rowSnapStart: CFTimeInterval = 0
+    private var rowSnapLink: CADisplayLink?
+
+    /// A precision gesture that has come to rest — its momentum ended, or the
+    /// fingers lifted with none to follow — settles onto the nearest row
+    /// (Settings → Animations → Snap to whole row). Wheels have no phases
+    /// and never leave a drawn remainder, so they never snap.
+    private func scheduleRowSnapIfGestureEnded(_ event: NSEvent) {
+        guard event.hasPreciseScrollingDeltas else { return }
+        let wait: Duration
+        if event.momentumPhase == .ended || event.momentumPhase == .cancelled {
+            wait = .zero
+        } else if event.phase == .ended || event.phase == .cancelled {
+            wait = Self.momentumGrace
+        } else {
+            return
+        }
+        rowSnapWait = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: wait)
+            guard !Task.isCancelled else { return }
+            self?.beginRowSnap()
+        }
+    }
+
+    /// Only where a precision scroll moves the scrollback viewport: with
+    /// mouse capture the core turns it into wheel reports, and on a screen
+    /// without scrollback (the alternate screen) into arrow keys — there a
+    /// row-committing nudge would reach the program as input.
+    private func beginRowSnap() {
+        rowSnapWait = nil
+        guard Preferences.shared.smoothScrolling, Preferences.shared.snapScrollToRow,
+              let surface, !ghostty_surface_mouse_captured(surface),
+              lastScrollbarSnapshot?.hasScrollback == true,
+              let snap = RowSnap(pending: scrollAccumulator.pending, cellHeight: cellHeightPixels)
+        else { return }
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            snap.targets(at: RowSnap.duration).forEach(aimScrollRemainder(at:))
+            return
+        }
+        rowSnap = snap
+        rowSnapStart = CACurrentMediaTime()
+        if rowSnapLink == nil {
+            let link = displayLink(target: self, selector: #selector(rowSnapFrame(_:)))
+            link.add(to: .main, forMode: .common)
+            rowSnapLink = link
+        }
+    }
+
+    @objc
+    private func rowSnapFrame(_: CADisplayLink) {
+        guard let snap = rowSnap, surface != nil else {
+            cancelRowSnap()
+            return
+        }
+        let elapsed = CACurrentMediaTime() - rowSnapStart
+        snap.targets(at: elapsed).forEach(aimScrollRemainder(at:))
+        if snap.isFinished(at: elapsed) { cancelRowSnap() }
+    }
+
+    /// Stop a settle where it is drawn — the next gesture continues from
+    /// there — and drop one still waiting out the momentum grace. The link
+    /// retains its target, so it is invalidated rather than paused.
+    private func cancelRowSnap() {
+        rowSnapWait?.cancel()
+        rowSnapWait = nil
+        rowSnap = nil
+        rowSnapLink?.invalidate()
+        rowSnapLink = nil
     }
 
     private func scrollMods(for event: NSEvent) -> ghostty_input_scroll_mods_t {
@@ -1394,13 +1752,43 @@ final class GhosttyTerminalNSView: NSView {
 
     // MARK: - Context menu
 
-    private func presentContextMenu(with event: NSEvent) {
+    /// AppKit asks for the menu on a right click libghostty didn't consume
+    /// (`rightMouseDown` hands those to super) and on a ⌃-click, which it asks
+    /// about before any mouse event.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        switch event.type {
+        case .rightMouseDown:
+            break
+        case .leftMouseDown:
+            // Ghostty.app's rule: ⌃-click is a right click, unless a program
+            // is capturing the mouse — then it gets the ⌃-click as a click.
+            guard event.modifierFlags.contains(.control), let surface,
+                  !ghostty_surface_mouse_captured(surface)
+            else { return nil }
+            // With a menu up the press never reaches `mouseDown`, so send the
+            // right press a right click would have: `right-click-action` acts
+            // on it (by default, selecting the word for the menu's Copy).
+            let pt = mousePoint(from: event)
+            ghostty_surface_mouse_pos(surface, pt.x, pt.y, mods(event))
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, mods(event))
+        default:
+            return nil
+        }
+        return contextMenu()
+    }
+
+    private func contextMenu() -> NSMenu {
         let menu = NSMenu(title: "Terminal")
         // Auto-enabling would override every `isEnabled` below: with no
         // `validateMenuItem` on the target, AppKit enables any item whose target
         // responds to its action, which is what kept Paste enabled on an empty
         // pasteboard. Off, the explicit states (Paste, Jump to Top/Bottom) hold.
         menu.autoenablesItems = false
+        if let surface, ghostty_surface_has_selection(surface) {
+            let copy = NSMenuItem(title: "Copy", action: #selector(handleCopy), keyEquivalent: "")
+            copy.target = self
+            menu.addItem(copy)
+        }
         let paste = NSMenuItem(title: "Paste", action: #selector(handlePaste), keyEquivalent: "")
         paste.target = self
         paste.isEnabled = GhosttyCallbacks.hasPasteboardContent()
@@ -1422,7 +1810,12 @@ final class GhosttyTerminalNSView: NSView {
             zoom.target = self
             menu.addItem(zoom)
         }
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        return menu
+    }
+
+    @objc
+    private func handleCopy() {
+        sendBindingAction("copy_to_clipboard")
     }
 
     @objc
@@ -1684,6 +2077,9 @@ extension GhosttyTerminalNSView {
         // Same liveness signal a keystroke sends (execution tracking + poll
         // resume), so an injected command updates the tab title promptly.
         onInteraction?()
+        // Text a program reads at a password prompt is the password, whoever
+        // typed it — the e2e suite answers prompts this way.
+        PasswordPromptMonitor.shared.viewDidSendText(self, text: text)
         recordCommandInput(text)
         text.withCString { ptr in
             _ = ghostty_surface_key(surface, Self.textOnlyKeyEvent(ptr))
@@ -1694,6 +2090,37 @@ extension GhosttyTerminalNSView {
             if hasContent { preserveProgrammaticCommandInput(text) }
         }
         return true
+    }
+
+    /// Type a saved password into the program reading it, then Return. The
+    /// password goes through the same text path as `sendText` — not paste, so
+    /// no bracketed-paste markers reach the password read — but records no
+    /// command-submission evidence: a password is never a command. The Return
+    /// rides `sendKey`, so it does ping `onInteraction` and reports a bare
+    /// `onCommandSubmitted(false)`, exactly as a Return the user presses.
+    /// `submit: false` leaves the Return to the user (an on-demand fill into
+    /// a line that echoes).
+    @discardableResult
+    func sendSecret(_ secret: String, submit: Bool = true) -> Bool {
+        guard let surface, !secret.isEmpty else { return false }
+        secret.withCString { ptr in
+            _ = ghostty_surface_key(surface, Self.textOnlyKeyEvent(ptr))
+        }
+        return submit ? sendKey(keyCode: 36, mods: []) : true
+    }
+
+    /// The cursor cell, in this view's coordinates — where a popover about
+    /// the line being typed on points. libghostty reports it for the IME
+    /// candidate window (`firstRect(forCharacterRange:)` below), shift from
+    /// smooth scrolling included. Nil when there's no surface or the cursor is
+    /// outside the visible bounds (scrolled away).
+    func cursorCellRect() -> NSRect? {
+        guard let surface else { return nil }
+        var x: Double = 0, y: Double = 0, w: Double = 0, h: Double = 0
+        ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        guard h > 0 else { return nil }
+        let rect = NSRect(x: x, y: bounds.height - y - h, width: max(w, 1), height: h)
+        return bounds.intersects(rect) ? rect.intersection(bounds) : nil
     }
 
     /// Send a single key chord through libghostty's key-*encoding* path — the
@@ -1720,6 +2147,7 @@ extension GhosttyTerminalNSView {
     func sendKey(keyCode: UInt16, mods flags: NSEvent.ModifierFlags) -> Bool {
         guard let surface else { return false }
         onInteraction?()
+        PasswordPromptMonitor.shared.viewDidSendKey(self, keyCode: keyCode, mods: flags)
         if TerminalCommandSubmission.clearsInputEvidence(
             keyCode: keyCode,
             hasControl: flags.contains(.control),

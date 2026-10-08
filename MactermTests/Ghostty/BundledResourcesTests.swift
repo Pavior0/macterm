@@ -80,4 +80,42 @@ struct BundledResourcesTests {
         // themes are upstream's iTerm2-Color-Schemes names, spaces and all).
         #expect(exists("ghostty/themes/Rose Pine"), "expected bundled ghostty theme missing")
     }
+
+    /// The zmx inside the built bundle must be signed as the app itself. Each
+    /// session daemon disclaims the app at spawn and is the *responsible
+    /// process* for every program in its session, and macOS identifies a
+    /// responsible process by its code signature's identifier: with the app's,
+    /// the daemon resolves to Macterm's name, usage descriptions and existing
+    /// Local Network / TCC grants (#419). The release download is only
+    /// linker-signed as `zmx`, and Xcode never re-signs a Mach-O it copies into
+    /// Resources/, so `scripts/embed-zmx.sh` does it — this pins that a build
+    /// phase edit can't silently turn every pane prompt into one for "zmx".
+    /// Read from the test host's own bundle, which is the built app.
+    @Test
+    func bundled_zmx_is_signed_as_the_app() throws {
+        let zmx = try #require(
+            Bundle.main.url(forResource: "zmx", withExtension: nil, subdirectory: "zmx"),
+            "zmx/zmx missing from the built bundle — run `mise run setup`"
+        )
+        let appID = try #require(Bundle.main.bundleIdentifier)
+        let signature = try Self.run("/usr/bin/codesign", ["--display", "--verbose", zmx.path])
+        #expect(signature.status == 0, "codesign could not read zmx: \(signature.output)")
+        #expect(
+            signature.output.contains("Identifier=\(appID)\n"),
+            "zmx is not signed as \(appID):\n\(signature.output)"
+        )
+    }
+
+    private static func run(_ tool: String, _ arguments: [String]) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        return (process.terminationStatus, output)
+    }
 }

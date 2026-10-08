@@ -142,6 +142,52 @@ class MactermHarness:
         state = result.stdout.strip()
         return result.returncode == 0 and bool(state) and not state.startswith("Z")
 
+    def front_pid(self):
+        """The pid of the active app — LaunchServices' front process, read
+        with `lsappinfo` (no TCC grant, unlike System Events) — or None with
+        the raw text when nothing is front or the answer can't be read. The
+        key has been spelled both `"pid"=N` and `pid = N` across macOS
+        releases; a third spelling fails loudly through the text."""
+        front = sh(["lsappinfo", "front"]).stdout.strip()
+        if not front:
+            return None, "lsappinfo front: (nothing)"
+        info = sh(["lsappinfo", "info", "-only", "pid", front]).stdout
+        match = re.search(r'"?pid"?\s*=\s*(\d+)', info)
+        if match is None:
+            return None, f"lsappinfo front: {front}; info -only pid: {info.strip()!r}"
+        return int(match.group(1)), front
+
+    def is_frontmost(self):
+        """Whether this instance is the active app. False too when its pid
+        is unknown or nothing is front at all."""
+        return self.pid is not None and self.front_pid()[0] == self.pid
+
+    def activate(self, timeout=30):
+        """Make this instance the active app and wait until LaunchServices
+        agrees. Launch-time activation is not for keeps: `open -n` of another
+        instance (a test with a harness of its own) fronts that one, and when
+        it is killed macOS hands the front to Finder, not back to us — after
+        which the app's key window is gone and anything keyed off it (the
+        password monitor polls only the key window's focused pane, and runs
+        no timer at all while the app is inactive) stops. The bench `activate`
+        hook forces activation (`ignoringOtherApps`), since the cooperative
+        request is refused once another app holds the front; re-posted each
+        poll, as one request can still be dropped on a busy desktop."""
+
+        last = [""]
+
+        def taken():
+            if self.is_frontmost():
+                return True
+            last[0] = self.front_pid()[1]
+            notify("activate")
+            return False
+
+        try:
+            wait_for(taken, timeout=timeout, interval=1, message="the app to become the active app")
+        except HarnessError as error:
+            raise HarnessError(f"{error} (pid {self.pid}; {last[0]})") from None
+
     def open_project(self, attempts=30):
         """Ask the app to open a project so a real shell + surface is on
         screen. ProjectStore.add saves projects.json into the isolated data
@@ -236,11 +282,10 @@ class MactermHarness:
     def cli(self, *args, check=True, timeout=60):
         """Run the bundled `macterm` CLI against this instance's socket.
 
-        `--socket` is appended AFTER the args, which is safe for every verb
-        except `pane run` (its passthrough capture would swallow trailing
-        flags into the typed command — and the CLI would then fall back to
-        socket discovery, possibly reaching a real Macterm). Use pane_run()
-        for that verb.
+        `--socket` is appended AFTER the args, so args must not contain a
+        `--` terminator: past one the flag is an argument (`pane run` would
+        type it) and the CLI falls back to socket discovery — possibly
+        reaching a real Macterm. Use pane_run() for that verb.
         """
         if not os.path.exists(self.cli_path):
             raise HarnessError("bundled macterm CLI missing from the app")
@@ -258,9 +303,9 @@ class MactermHarness:
 
     def pane_run(self, command, pane=None, session=None, submit=True):
         """Type `command` into a live pane's shell, with a trailing newline
-        unless `submit=False` (which leaves it on the prompt). Connection and
-        targeting flags are placed BEFORE the command because `pane run`
-        captures everything after its first positional — see cli()."""
+        unless `submit=False` (which leaves it on the prompt). The command goes
+        after `--`, so it is typed verbatim whatever it starts with, and every
+        flag goes before it — see cli()."""
         args = [self.cli_path, "pane", "run", "--socket", self.socket]
         if pane:
             args += ["--pane", pane]
@@ -268,7 +313,7 @@ class MactermHarness:
             args += ["--session", session]
         if not submit:
             args.append("--no-submit")
-        args.append(command)
+        args += ["--", command]
         result = sh(args, timeout=60, env=self._cli_environment())
         if result.returncode != 0:
             raise HarnessError(f"macterm pane run failed: {result.stderr.strip()}")

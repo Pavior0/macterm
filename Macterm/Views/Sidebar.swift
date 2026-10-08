@@ -243,7 +243,7 @@ struct SidebarContent: View {
     @Environment(ProjectStore.self)
     private var projectStore
     @AppStorage(Preferences.Keys.showNewProjectButton)
-    private var showNewProjectButton = true
+    private var showNewProjectButton: Bool
     @Bindable
     private var presentation: SidebarPresentationState
     private let isInteractive: Bool
@@ -435,6 +435,23 @@ struct SidebarContent: View {
                 )
             }
         }
+        // A folder dropped anywhere on the sidebar opens as a project. Over
+        // everything, including the rows' own drop targets, which it can't
+        // disturb: it takes file drags only (see `SidebarFolderDropTarget`).
+        .overlay {
+            SidebarFolderDropTarget(isEnabled: isInteractive) { paths in
+                openDroppedFolders(paths)
+            }
+        }
+    }
+
+    /// Folders dropped on the sidebar: a project each, the last selected in
+    /// this window and scrolled into view — new projects go to the end of the
+    /// list, which may be well below the fold.
+    private func openDroppedFolders(_ paths: [String]) {
+        guard let project = appState.openProjects(atPaths: paths, store: projectStore, in: windowState) else { return }
+        presentation.expandedProjects.insert(project.id)
+        presentation.scrollPosition = .project(project.id)
     }
 
     // MARK: - Pinned rows
@@ -595,7 +612,7 @@ struct SidebarContent: View {
             index: projectIndex + 1,
             presentation: presentation,
             isInteractive: isInteractive,
-            onRename: { projectStore.rename(id: project.id, to: $0) },
+            onRename: { appState.renameProject(project.id, to: $0, store: projectStore) },
             onNewTab: { createTab(in: project) }
         )
         .tag(SidebarItem.project(project.id))
@@ -770,6 +787,7 @@ struct SidebarContent: View {
     @ViewBuilder
     private func projectMenu(_ project: Project) -> some View {
         Button("New Tab") { createTab(in: project) }
+        worktreesMenu(for: project)
         Button("Copy Path") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(project.path, forType: .string)
@@ -799,10 +817,43 @@ struct SidebarContent: View {
         }
     }
 
+    /// The project's other git worktrees, each opening a tab of this project
+    /// in its directory. The listing is read from git's files as the menu is
+    /// built — the list's context-menu closure runs when the menu opens, not
+    /// when a row redraws — so it is never older than the right-click. It is
+    /// empty, and the item disabled, for a directory that isn't a repository's
+    /// top or has no other worktree, and for a remote project: that one's
+    /// files are reachable only over ssh, which a menu never starts.
+    @ViewBuilder
+    private func worktreesMenu(for project: Project) -> some View {
+        let worktrees = GitWorktrees.list(projectPath: project.path)
+        if worktrees.isEmpty {
+            // A disabled item, not a disabled `Menu`: a context menu drops
+            // `.disabled` on a submenu item — measured on macOS 27, it renders
+            // enabled, over an empty submenu that never opens.
+            Button("Worktrees") {}
+                .disabled(true)
+        } else {
+            Menu("Worktrees") {
+                ForEach(worktrees) { worktree in
+                    Button(worktree.title) { createTab(in: project, worktree: worktree) }
+                }
+            }
+        }
+    }
+
     /// Shared by the context menu and its optional hover shortcut.
     private func createTab(in project: Project) {
         appState.selectProject(project, in: windowState)
         appState.createTab(projectID: project.id, projects: projectStore.projects)
+        presentation.expandedProjects.insert(project.id)
+    }
+
+    /// `createTab(in:)` with the worktree's directory as the working directory
+    /// in place of the one `tab-inherit-working-directory` would pick.
+    private func createTab(in project: Project, worktree: GitWorktree) {
+        appState.selectProject(project, in: windowState)
+        appState.createTab(projectID: project.id, projects: projectStore.projects, workingDirectory: worktree.path)
         presentation.expandedProjects.insert(project.id)
     }
 
@@ -1063,7 +1114,7 @@ private struct SidebarProjectHeader: View {
     let onRename: (String) -> Void
     let onNewTab: () -> Void
     @AppStorage(Preferences.Keys.showProjectNewTabButton)
-    private var showProjectNewTabButton = true
+    private var showProjectNewTabButton: Bool
     @State
     private var isHovered = false
 
@@ -1240,7 +1291,7 @@ private struct SidebarProjectRow: View {
     @Environment(AppState.self)
     private var appState
     @AppStorage(Preferences.Keys.projectIconSymbol)
-    private var projectIconSymbol = "folder"
+    private var projectIconSymbol: String
     @FocusState
     private var focused: Bool
 
@@ -1351,13 +1402,13 @@ private struct SidebarTabRow: View {
     @Environment(AppState.self)
     private var appState
     @AppStorage(Preferences.Keys.tabIconSymbol)
-    private var tabIconSymbol = "terminal"
+    private var tabIconSymbol: String
     @AppStorage(Preferences.Keys.showAgentIcons)
-    private var showAgentIcons = true
+    private var showAgentIcons: Bool
     @AppStorage(Preferences.Keys.showTabStatusIndicator)
-    private var showTabStatusIndicator = false
+    private var showTabStatusIndicator: Bool
     @AppStorage(Preferences.Keys.showSpinnerOverAgentIcons)
-    private var showSpinnerOverAgentIcons = true
+    private var showSpinnerOverAgentIcons: Bool
     @FocusState
     private var focused: Bool
 

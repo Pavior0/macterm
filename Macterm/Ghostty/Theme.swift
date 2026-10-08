@@ -45,6 +45,8 @@ enum MactermTheme {
     @MainActor
     static var accent: Color { Color(nsColor: GhosttyApp.shared.accentColor) }
     @MainActor
+    static var nsAccent: NSColor { GhosttyApp.shared.accentColor }
+    @MainActor
     static var accentSoft: Color { Color(nsColor: GhosttyApp.shared.accentColor.withAlphaComponent(0.1)) }
     @MainActor
     static var terminalBg: Color { bg }
@@ -57,8 +59,9 @@ enum MactermTheme {
     }
 
     /// Semantic status colors, mapped from the ghostty terminal palette so they
-    /// track the user's theme instead of the fixed system `.yellow`/`.green`.
-    /// Palette indices follow the ANSI convention: 2 = green, 3 = yellow.
+    /// track the user's theme instead of the fixed system
+    /// `.red`/`.yellow`/`.green`. Palette indices follow the ANSI convention:
+    /// 1 = red, 2 = green, 3 = yellow.
     @MainActor
     static var warning: Color {
         GhosttyApp.shared.paletteColor(at: 3).map { Color(nsColor: $0) } ?? .yellow
@@ -67,6 +70,11 @@ enum MactermTheme {
     @MainActor
     static var success: Color {
         GhosttyApp.shared.paletteColor(at: 2).map { Color(nsColor: $0) } ?? .green
+    }
+
+    @MainActor
+    static var failure: Color {
+        GhosttyApp.shared.paletteColor(at: 1).map { Color(nsColor: $0) } ?? .red
     }
 
     /// A project's color tag. System colors rather than the ghostty palette —

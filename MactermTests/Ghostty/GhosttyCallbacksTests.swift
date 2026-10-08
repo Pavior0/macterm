@@ -1,4 +1,5 @@
 import AppKit
+import GhosttyKit
 @testable import Macterm
 import Testing
 
@@ -133,5 +134,50 @@ struct GhosttyCallbacksTests {
         let url = GhosttyCallbacks.resolvedOpenTarget("~/notes.txt")
         #expect(url.isFileURL)
         #expect(url.path == NSHomeDirectory() + "/notes.txt")
+    }
+
+    // MARK: - GHOSTTY_ACTION_PROGRESS_REPORT (OSC 9;4)
+
+    @Test
+    func progressReport_mapsEveryStateToWhatItMeansForTheRun() {
+        #expect(GhosttyCallbacks.progressReport(for: GHOSTTY_PROGRESS_STATE_SET) == .running)
+        #expect(GhosttyCallbacks.progressReport(for: GHOSTTY_PROGRESS_STATE_INDETERMINATE) == .running)
+        #expect(GhosttyCallbacks.progressReport(for: GHOSTTY_PROGRESS_STATE_ERROR) == .failed)
+        #expect(GhosttyCallbacks.progressReport(for: GHOSTTY_PROGRESS_STATE_REMOVE) == .ended)
+        // PAUSE has always ended a run, and still ends it as a success.
+        #expect(GhosttyCallbacks.progressReport(for: GHOSTTY_PROGRESS_STATE_PAUSE) == .ended)
+    }
+
+    /// A state a newer libghostty adds ends the run rather than starting one,
+    /// so an unrecognised report can never leave a spinner up.
+    @Test
+    func progressReport_endsTheRunOnAnUnknownState() {
+        let unknown = ghostty_action_progress_report_state_e(rawValue: 99)
+        #expect(GhosttyCallbacks.progressReport(for: unknown) == .ended)
+    }
+
+    // MARK: - GHOSTTY_ACTION_TOGGLE_FULLSCREEN
+
+    /// The chords the handler answers, read off ghostty's real defaults: ⌃⌘F
+    /// is the trigger ghostty reports for `toggle_fullscreen` on macOS (the
+    /// last one it defines), and ⌘↩ is bound as well. A GhosttyKit bump that
+    /// moves either fails here instead of leaving a documented shortcut dead.
+    @Test
+    func toggleFullscreen_defaultChordsAreControlCommandFAndCommandReturn() throws {
+        let config = try #require(ghostty_config_new())
+        defer { ghostty_config_free(config) }
+        ghostty_config_finalize(config)
+
+        let action = "toggle_fullscreen"
+        let trigger = ghostty_config_trigger(config, action, UInt(action.utf8.count))
+        #expect(trigger.tag == GHOSTTY_TRIGGER_UNICODE)
+        #expect(trigger.key.unicode == ("f" as Unicode.Scalar).value)
+        #expect(trigger.mods.rawValue == GHOSTTY_MODS_SUPER.rawValue | GHOSTTY_MODS_CTRL.rawValue)
+
+        var commandReturn = ghostty_input_key_s()
+        commandReturn.action = GHOSTTY_ACTION_PRESS
+        commandReturn.keycode = 36 // kVK_Return
+        commandReturn.mods = GHOSTTY_MODS_SUPER
+        #expect(ghostty_config_key_is_binding(config, commandReturn))
     }
 }

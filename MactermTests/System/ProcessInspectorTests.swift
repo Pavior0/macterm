@@ -158,10 +158,64 @@ struct ProcessInspectorTests {
     }
 
     @Test
+    func remoteInvokedNames_offers_each_end_of_a_spaced_script_path() {
+        // `ps -o args=` loses argv's quoting, so a script path with a space
+        // can't be split back out; every possible end is offered, shortest
+        // first, up to a flag.
+        #expect(ProcessInspector.remoteInvokedNames(
+            commandLine: "node /home/me/My Tools/gemini-cli/bin/gemini --yolo"
+        ) == ["My", "gemini"])
+        #expect(ProcessInspector.remoteInvokedNames(
+            commandLine: "node /usr/local/lib/node_modules/@google/gemini-cli/bin/gemini"
+        ) == ["gemini"])
+    }
+
+    @Test
+    func remoteInvokedNames_stops_at_a_complete_script_or_a_flag() {
+        // A script extension ends the path, so a later path argument can't be
+        // read as the script.
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "node server.js /opt/claude") == ["server"])
+        // A word starting a new path is an argument, not the script's tail.
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "node bin/lint /src/claude") == ["lint"])
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "node bin/lint ~/claude") == ["lint"])
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "node --inspect app.js").isEmpty)
+    }
+
+    @Test
+    func remoteInvokedNames_is_argv0_for_anything_but_an_interpreter() {
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "claude --resume") == ["claude"])
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "/Users/me/.local/bin/claude") == ["claude"])
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "node") == ["node"])
+        #expect(ProcessInspector.remoteInvokedNames(commandLine: "").isEmpty)
+    }
+
+    @Test
     func isInterpreterName_only_matches_interpreters() {
         #expect(ProcessInspector.isInterpreterName("node"))
         #expect(ProcessInspector.isInterpreterName("Python3"))
         #expect(!ProcessInspector.isInterpreterName("claude"))
         #expect(!ProcessInspector.isInterpreterName("zsh"))
+    }
+
+    // MARK: - isProtectedExecutable
+
+    @Test
+    func system_binaries_are_protected() {
+        #expect(ProcessInspector.isProtectedExecutable(atPath: "/usr/bin/sudo"))
+        #expect(ProcessInspector.isProtectedExecutable(atPath: "/usr/bin/ssh"))
+    }
+
+    @Test
+    func a_binary_the_user_could_replace_is_not_protected() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pi-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fake = dir.appendingPathComponent("sudo")
+        try Data("#!/bin/sh\n".utf8).write(to: fake)
+        // Read-only doesn't help: the user owns it and can chmod it back.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: fake.path)
+        #expect(!ProcessInspector.isProtectedExecutable(atPath: fake.path))
+        #expect(!ProcessInspector.isProtectedExecutable(atPath: "/usr/bin/no-such-program"))
+        #expect(!ProcessInspector.isProtectedExecutable(atPath: "usr/bin/sudo"), "relative paths never are")
     }
 }

@@ -16,12 +16,15 @@ struct MactermCommand: ParsableCommand {
             ProjectCommand.self,
             TabCommand.self,
             WindowCommand.self,
+            WidgetCommand.self,
+            PaletteCommand.self,
             PaneCommand.self,
             Grid.self,
             SessionCommand.self,
             LayoutCommand.self,
             TutorCommand.self,
             SSHCommand.self,
+            SkillsCommand.self,
         ]
     )
 }
@@ -60,6 +63,23 @@ func runControlCommand(command: String, args: ControlArgs? = nil, options: Conne
 func sessionFromEnvironment() -> String? {
     let value = ProcessInfo.processInfo.environment[ControlProtocol.sessionEnvVar]
     return (value?.isEmpty ?? true) ? nil : value
+}
+
+/// Whether a `.captureForPassthrough` argument opens with one of
+/// ArgumentParser's help flags (its default `-h`/`--help`). The capture takes
+/// every word from the first one it doesn't recognize, help flags included,
+/// before ArgumentParser looks for them — so a verb built on it must answer
+/// help itself, and only for the first word: after real text, `--help`
+/// belongs to that text (`macterm ssh host --help` passes `--help` to ssh).
+func startsWithHelpFlag(_ words: [String]) -> Bool {
+    words.first == "--help" || words.first == "-h"
+}
+
+/// `word` quoted for a POSIX shell, left bare when it needs no quoting.
+func shellQuoted(_ word: String) -> String {
+    let bare = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "@%+=:,./_-"))
+    if !word.isEmpty, word.unicodeScalars.allSatisfy(bare.contains) { return word }
+    return "'" + word.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
 }
 
 /// Shared pane-target options: `--session`/`--pane` are explicit; inside a
@@ -124,10 +144,10 @@ struct ProjectCommand: ParsableCommand {
 
     struct Create: ParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Add a project for a local directory (idempotent by path)."
+            abstract: "Add a project for a local directory or remote spec (a new one on every run)."
         )
 
-        @Argument(help: "Project directory (absolute or ~-prefixed).")
+        @Argument(help: "Project directory (absolute or ~-prefixed), or a remote [user@]host:dir.")
         var path: String
 
         @Option(help: "Display name. Defaults to the directory name.")
@@ -496,6 +516,7 @@ struct PaneCommand: ParsableCommand {
         #if DEBUG
         subs.append(Resize.self)
         subs.append(Move.self)
+        subs.append(Password.self)
         #endif
         return subs
     }
@@ -615,8 +636,20 @@ struct PaneCommand: ParsableCommand {
     struct Run: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Type a command into a live pane's shell (adds a newline).",
+            // The generated line would end `[<command> ...]` and never show
+            // the `--` the discussion asks for.
+            usage: "macterm pane run [<options>] [--] <command> ...",
             discussion: """
             Pastes a command line into an existing pane's shell and submits it.
+
+            Put the command line after `--`: everything after it is typed \
+            verbatim, dashes included, so `macterm pane run --session X -- \
+            ls -la` types `ls -la` into X. Before `--`, this command's flags \
+            are parsed wherever they appear and words with no leading dash are \
+            typed, so `macterm pane run ls` needs no `--`. Any other \
+            dash-prefixed word before `--` is an error and nothing is typed: \
+            `macterm pane run ls -la` refuses rather than guess whose flag \
+            `-la` is. `--help` or `-h` before `--` shows this help.
 
             `--no-submit` withholds the trailing newline, so the text lands on \
             the prompt unsubmitted — pre-filling a command for a human to \
@@ -634,9 +667,6 @@ struct PaneCommand: ParsableCommand {
             """
         )
 
-        @Argument(parsing: .captureForPassthrough, help: "The command line to run.")
-        var command: [String]
-
         @Flag(
             name: .customLong("no-submit"),
             help: "Leave the text on the prompt instead of running it (omits the trailing newline)."
@@ -646,8 +676,37 @@ struct PaneCommand: ParsableCommand {
         @OptionGroup var target: PaneTarget
         @OptionGroup var options: ConnectionOptions
 
+        /// Every word no flag claimed, in order, the `--` terminator included:
+        /// ArgumentParser keeps it here, and only the first `--` can be one
+        /// (past it every word is a value). Split by hand because a second
+        /// array argument, `.postTerminator`, fails ArgumentParser's
+        /// debug-build validation next to this one.
+        @Argument(parsing: .allUnrecognized, help: "The command line to type (after `--`, verbatim).")
+        var command: [String] = []
+
+        /// The words before `--`. Plain ones are typed; a dash-prefixed one
+        /// fails `validate()`, since it is either a mistyped flag or a flag
+        /// meant for the typed command, and guessing which is how text used to
+        /// reach the wrong pane.
+        private var leadingWords: ArraySlice<String> {
+            command.prefix { $0 != "--" }
+        }
+
+        private var typedWords: [String] {
+            Array(leadingWords) + command.drop { $0 != "--" }.dropFirst()
+        }
+
+        func validate() throws {
+            guard let stray = leadingWords.first(where: Self.isDashWord) else { return }
+            throw ValidationError("""
+            `\(stray)` is not a `pane run` option, so nothing was typed. \
+            To type it, put the command line after `--`:
+              \(correctedInvocation())
+            """)
+        }
+
         func run() throws {
-            let line = command.joined(separator: " ")
+            let line = typedWords.joined(separator: " ")
             guard !line.isEmpty else {
                 Output.printError("nothing to run")
                 throw ExitCode(1)
@@ -658,6 +717,30 @@ struct PaneCommand: ParsableCommand {
             // submit, so the wire keeps working for a client predating the flag.
             if noSubmit { args.submit = false }
             try runControlCommand(command: "pane.run", args: args, options: options)
+        }
+
+        /// A bare `-` is stdin to most programs, not a flag.
+        private static func isDashWord(_ word: String) -> Bool {
+            word.hasPrefix("-") && word != "-"
+        }
+
+        /// This invocation with the command line moved after `--`, quoted so it
+        /// pastes back as is. It restates the targets, or the retry would type
+        /// into the current pane instead of the one the user named.
+        private func correctedInvocation() -> String {
+            var argv = ["macterm", "pane", "run"]
+            if noSubmit { argv.append("--no-submit") }
+            let valued = [
+                ("--project", target.project), ("--tab", target.tab), ("--pane", target.pane),
+                ("--session", target.session), ("--socket", options.socket),
+            ]
+            for case let (flag, value?) in valued {
+                argv += [flag, value]
+            }
+            if options.json { argv.append("--json") }
+            argv.append("--")
+            argv += typedWords
+            return argv.map(shellQuoted).joined(separator: " ")
         }
     }
 
@@ -793,6 +876,27 @@ struct PaneCommand: ParsableCommand {
             args.cols = cols
             args.rows = rows
             try runControlCommand(command: "pane.resize", args: args, options: options)
+        }
+    }
+
+    /// DEBUG-only: the password monitor's state for a pane, and a way to
+    /// answer its bubble headlessly — what the e2e suite drives. Never the
+    /// password itself.
+    struct Password: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "[debug] Read a pane's password-prompt state, or answer its bubble."
+        )
+
+        @Option(help: "Answer the bubble: accept (Save/Update), dismiss, or autofill.")
+        var answer: String?
+
+        @OptionGroup var target: PaneTarget
+        @OptionGroup var options: ConnectionOptions
+
+        func run() throws {
+            var args = target.controlArgs()
+            args.answer = answer
+            try runControlCommand(command: "pane.password", args: args, options: options)
         }
     }
 

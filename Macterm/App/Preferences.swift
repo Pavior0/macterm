@@ -34,6 +34,24 @@ enum NewTerminalWorkingDirectory: Equatable {
     }
 }
 
+/// Where a text file opened with Macterm gets its editor
+/// (`Preferences.textFilePlacement`). The raw values are persisted.
+enum TextFilePlacement: String, CaseIterable, Identifiable {
+    /// A split beside the clicked pane, or the project's focused pane, along
+    /// its longer axis — the same choice as Split Automatically.
+    case split
+    case tab
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .split: "New split"
+        case .tab: "New tab"
+        }
+    }
+}
+
 /// When the numbered tab switcher in the title bar is shown.
 enum TabSwitcherVisibility: String, CaseIterable, Identifiable {
     case always
@@ -84,6 +102,26 @@ enum WorkspaceTabLayout: String, CaseIterable, Identifiable {
 /// That is harmless because the comparison versions can't collide: a beta sorts
 /// below the stable release of the same `X.Y.Z` and a tip sorts above it (see
 /// `sparkle_comparison_version` in scripts/_lib.sh).
+/// When Autofill asks the user to authenticate (Settings → Password Manager). The raw
+/// values are persisted; the case order is the picker's.
+enum PasswordAutofillAuthentication: String, CaseIterable, Identifiable {
+    /// The default, "Once per app launch": the first Autofill asks, and the
+    /// answer stands until Macterm quits, the Mac locks or sleeps, or the user
+    /// switches away. The raw value predates the label; it is persisted.
+    case untilLocked
+    /// Every Autofill, like Safari.
+    case everyTime
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .untilLocked: "Once per app launch"
+        case .everyTime: "Every time"
+        }
+    }
+}
+
 enum UpdateChannel: String, CaseIterable, Identifiable {
     case stable
     case beta
@@ -250,97 +288,106 @@ final class Preferences {
 
     var autoTilingEnabled: Bool {
         didSet {
-            defaults.set(autoTilingEnabled, forKey: Keys.autoTiling)
+            Keys.autoTiling.write(autoTilingEnabled, to: defaults)
             // Legacy notification — listeners predate Preferences.
             NotificationCenter.default.post(name: .autoTilingEnabledDidChange, object: nil)
         }
     }
 
-    // MARK: - Experimental (Settings → Experimental; all default off)
+    // MARK: - Animations (Settings → Animations)
 
-    /// Pixel-precise trackpad scrolling through scrollback. Written to the
-    /// overrides as the fork's `smooth-scroll` key (`MactermConfig
-    /// .Experiments`): libghostty already accumulates precise deltas in
-    /// pixels, and with the key on it renders the sub-row remainder instead
-    /// of dropping it. Every wheel event reaches libghostty untouched (#393),
-    /// so the gate has to live on that side.
+    /// Pixel-precise trackpad scrolling through scrollback, on by default.
+    /// Written to the overrides as the fork's `smooth-scroll` key
+    /// (`MactermConfig.Animations`): libghostty already accumulates precise
+    /// deltas in pixels, and with the key on it renders the sub-row remainder
+    /// instead of dropping it. Every wheel event reaches libghostty untouched
+    /// (#393), so the gate has to live on that side.
     var smoothScrolling: Bool {
         didSet {
-            defaults.set(smoothScrolling, forKey: Keys.smoothScrolling)
+            Keys.smoothScrolling.write(smoothScrolling, to: defaults)
             notifyConfigChanged()
         }
     }
 
-    /// The cursor glides between cells instead of jumping. Implemented as a
-    /// bundled ghostty custom shader (`Resources/shaders/cursor_glide.glsl`)
-    /// that Macterm appends to the config through the overrides file, along
-    /// with `cursor-opacity = 0` so the shader can be the focused cursor.
-    /// See `MactermConfig.Experiments`.
+    /// When a smooth-scroll gesture ends, settle the viewport onto the
+    /// nearest whole row instead of leaving it between rows. Off by default
+    /// and meaningful only under `smoothScrolling`. Macterm-side, read live by
+    /// `GhosttyTerminalNSView` when a gesture ends — the fork has no such key,
+    /// and the settle rides the same synthetic precision scroll a scroller
+    /// drag uses (`RowSnap`).
+    var snapScrollToRow: Bool {
+        didSet { Keys.snapScrollToRow.write(snapScrollToRow, to: defaults) }
+    }
+
+    /// The cursor glides between cells instead of jumping, and the text it
+    /// covers on the way is cursor-colored exactly as far as it is covered.
+    /// The fork's `smooth-cursor` key, written through the overrides file.
+    /// See `MactermConfig.Animations`.
     var smoothCursor: Bool {
         didSet {
-            defaults.set(smoothCursor, forKey: Keys.smoothCursor)
+            Keys.smoothCursor.write(smoothCursor, to: defaults)
             notifyConfigChanged()
         }
     }
 
-    /// A fading streak follows the cursor across larger moves. The bundled
-    /// `cursor_trail.glsl`, injected the same way as `smoothCursor`.
+    /// A fading streak follows the cursor across larger moves. The fork's
+    /// `cursor-trail` key, written through the overrides file.
     var cursorTrail: Bool {
         didSet {
-            defaults.set(cursorTrail, forKey: Keys.cursorTrail)
+            Keys.cursorTrail.write(cursorTrail, to: defaults)
             notifyConfigChanged()
         }
     }
 
-    /// Hyprland-style split animations (its `slide`): a new pane slides in
-    /// from the nearest edge while its neighbours retile, a closing pane
-    /// slides back out, and zoom grows the pane over the layout. Pure
-    /// Macterm chrome — the tab's
-    /// tree is rendered flat by `AnimatedSplitView` (one animatable frame per
-    /// pane) instead of the recursive `SplitTreeView`, and nothing reaches
-    /// libghostty beyond the per-frame surface resizes a divider drag already
-    /// causes. Off: the recursive view, exactly as before.
+    /// Hyprland-style split animations (its `slide`), on by default: a new
+    /// pane slides in from the nearest edge while its neighbours retile, a
+    /// closing pane slides back out, and zoom grows the pane over the layout.
+    /// Pure Macterm chrome — the tab's tree is rendered flat by
+    /// `AnimatedSplitView` (one animatable frame per pane) instead of the
+    /// recursive `SplitTreeView`, and nothing reaches libghostty beyond the
+    /// per-frame surface resizes a divider drag already causes. Off: the
+    /// recursive view.
     var animatedSplits: Bool {
-        didSet { defaults.set(animatedSplits, forKey: Keys.animatedSplits) }
+        didSet { Keys.animatedSplits.write(animatedSplits, to: defaults) }
     }
 
     /// Presentation used by `peekSidebarWhenHidden`. The pinned sidebar is
     /// always the native split-view column.
     var sidebarPeekStyle: SidebarPeekStyle {
-        didSet { defaults.set(sidebarPeekStyle.rawValue, forKey: Keys.sidebarPeekStyle) }
+        didSet { Keys.sidebarPeekStyle.write(sidebarPeekStyle, to: defaults) }
     }
 
     /// Navigation layout for projects and their tabs in the main window.
     var workspaceTabLayout: WorkspaceTabLayout {
-        didSet { defaults.set(workspaceTabLayout.rawValue, forKey: Keys.workspaceTabLayout) }
+        didSet { Keys.workspaceTabLayout.write(workspaceTabLayout, to: defaults) }
     }
 
     // MARK: - Sidebar icons
 
     var projectIconSymbol: String {
-        didSet { defaults.set(projectIconSymbol, forKey: Keys.projectIconSymbol) }
+        didSet { Keys.projectIconSymbol.write(projectIconSymbol, to: defaults) }
     }
 
     var tabIconSymbol: String {
-        didSet { defaults.set(tabIconSymbol, forKey: Keys.tabIconSymbol) }
+        didSet { Keys.tabIconSymbol.write(tabIconSymbol, to: defaults) }
     }
 
     /// How large the leading glyph on project and tab rows draws.
     var sidebarIconSize: SidebarIconSize {
-        didSet { defaults.set(sidebarIconSize.rawValue, forKey: Keys.sidebarIconSize) }
+        didSet { Keys.sidebarIconSize.write(sidebarIconSize, to: defaults) }
     }
 
     /// Replace a tab's icon with the running AI agent's logo (Claude Code,
     /// Codex, …) while one holds the pane's foreground. On by default.
     var showAgentIcons: Bool {
-        didSet { defaults.set(showAgentIcons, forKey: Keys.showAgentIcons) }
+        didSet { Keys.showAgentIcons.write(showAgentIcons, to: defaults) }
     }
 
     /// Show a status badge over each tab icon: a spinner while a command is
     /// running (replacing the icon) and a small status dot when a command has
     /// finished and awaits attention. Off = pure icons, no status tracking.
     var showTabStatusIndicator: Bool {
-        didSet { defaults.set(showTabStatusIndicator, forKey: Keys.showTabStatusIndicator) }
+        didSet { Keys.showTabStatusIndicator.write(showTabStatusIndicator, to: defaults) }
     }
 
     /// Show a transient tab switcher while the Recent Tab shortcut is held
@@ -350,14 +397,14 @@ final class Preferences {
     /// where each press switches tabs for real rather than moving a selection
     /// — and skips the pane snapshots entirely, so it costs nothing there.
     var showTabSwitcherOverlay: Bool {
-        didSet { defaults.set(showTabSwitcherOverlay, forKey: Keys.showTabSwitcherOverlay) }
+        didSet { Keys.showTabSwitcherOverlay.write(showTabSwitcherOverlay, to: defaults) }
     }
 
     /// Finite candidate counts offered in Settings and accepted from storage.
-    static let recentTabCandidateRange = 2 ... 12
+    nonisolated static let recentTabCandidateRange = 2 ... 12
     /// The stored value meaning "every tab". Also the default, so an upgrade
     /// changes nothing about how far the Recent Tab shortcut reaches.
-    static let unlimitedRecentTabCandidates = 0
+    nonisolated static let unlimitedRecentTabCandidates = 0
 
     /// How many of the most recent tabs the Recent Tab shortcut cycles
     /// through, with or without the switcher showing —
@@ -365,7 +412,7 @@ final class Preferences {
     /// unreachable by the gesture, so this bounds the cycle itself, not just
     /// the cards the switcher draws; the two are always the same list.
     var recentTabCandidates: Int {
-        didSet { defaults.set(recentTabCandidates, forKey: Keys.recentTabCandidates) }
+        didSet { Keys.recentTabCandidates.write(recentTabCandidates, to: defaults) }
     }
 
     /// Whether the running spinner also replaces an AI agent's logo (#225).
@@ -375,33 +422,23 @@ final class Preferences {
     /// replacing it). Meaningful only while `showTabStatusIndicator` and
     /// `showAgentIcons` are both on.
     var showSpinnerOverAgentIcons: Bool {
-        didSet { defaults.set(showSpinnerOverAgentIcons, forKey: Keys.showSpinnerOverAgentIcons) }
-    }
-
-    /// Auto-name tabs after the live foreground process / OSC title (on by
-    /// default). Off = tabs hold their static fallback (login shell name, or
-    /// the host name for remote panes); a user-set custom title always wins
-    /// either way. Display-only: the polling and probing keep running for
-    /// busy-close verdicts and execution tracking (`Pane.displayTitle` is
-    /// the single gate).
-    var autoNameTabs: Bool {
-        didSet { defaults.set(autoNameTabs, forKey: Keys.autoNameTabs) }
+        didSet { Keys.showSpinnerOverAgentIcons.write(showSpinnerOverAgentIcons, to: defaults) }
     }
 
     /// Give each new project a color tag. Off by default, and consulted at
     /// creation only — flipping it neither tags existing projects nor clears
     /// tags already set.
     var autoAssignProjectColors: Bool {
-        didSet { defaults.set(autoAssignProjectColors, forKey: Keys.autoAssignProjectColors) }
+        didSet { Keys.autoAssignProjectColors.write(autoAssignProjectColors, to: defaults) }
     }
 
     var showNewProjectButton: Bool {
-        didSet { defaults.set(showNewProjectButton, forKey: Keys.showNewProjectButton) }
+        didSet { Keys.showNewProjectButton.write(showNewProjectButton, to: defaults) }
     }
 
     /// Show a New Tab button while the pointer rests on a project row.
     var showProjectNewTabButton: Bool {
-        didSet { defaults.set(showProjectNewTabButton, forKey: Keys.showProjectNewTabButton) }
+        didSet { Keys.showProjectNewTabButton.write(showProjectNewTabButton, to: defaults) }
     }
 
     /// Allow non-interactive background ssh connections to remote-project
@@ -415,7 +452,7 @@ final class Preferences {
     /// only on a positively-known running command (OSC 133 execution state) —
     /// never from the conservative ssh-is-always-busy fallback.
     var backgroundSSHConnections: Bool {
-        didSet { defaults.set(backgroundSSHConnections, forKey: Keys.backgroundSSHConnections) }
+        didSet { Keys.backgroundSSHConnections.write(backgroundSSHConnections, to: defaults) }
     }
 
     /// Reconnect a remote pane whose ssh connection died (#281): respawn the
@@ -428,7 +465,50 @@ final class Preferences {
     /// a Touch ID-gated key (#272) would raise one prompt per dead pane on
     /// every wake.
     var reconnectRemotePanes: Bool {
-        didSet { defaults.set(reconnectRemotePanes, forKey: Keys.reconnectRemotePanes) }
+        didSet { Keys.reconnectRemotePanes.write(reconnectRemotePanes, to: defaults) }
+    }
+
+    /// Where a text file opened with Macterm gets its editor: a split beside
+    /// the pane (or the project's focused pane), or a tab of its own.
+    var textFilePlacement: TextFilePlacement {
+        didSet { Keys.textFilePlacement.write(textFilePlacement, to: defaults) }
+    }
+
+    /// The password manager (Settings → Password Manager): offering to save a
+    /// password once it works, and autofilling a saved one. Off, the monitor
+    /// captures, offers and fills nothing; prompt detection still drives
+    /// `macos-auto-secure-input`. Saved passwords stay in the keychain.
+    var passwordManagerEnabled: Bool {
+        didSet { Keys.passwordManagerEnabled.write(passwordManagerEnabled, to: defaults) }
+    }
+
+    // MARK: - Palettes (Settings → Palettes)
+
+    /// The palette screens the user has turned off, by id
+    /// (`PaletteScopeID.rawValue`; a custom palette's id later). A screen
+    /// turned off leaves the command palette's list and its menu, and its
+    /// chord says where it went instead of reaching the terminal. Stored as
+    /// the off set rather than the on set so a palette added later — a new
+    /// built-in, a new file — starts on.
+    var disabledPaletteIDs: [String] {
+        didSet { Keys.disabledPaletteIDs.write(disabledPaletteIDs, to: defaults) }
+    }
+
+    func isPaletteEnabled(_ id: String) -> Bool {
+        !disabledPaletteIDs.contains(id)
+    }
+
+    func setPalette(_ id: String, enabled: Bool) {
+        if enabled {
+            disabledPaletteIDs.removeAll { $0 == id }
+        } else if !disabledPaletteIDs.contains(id) {
+            disabledPaletteIDs.append(id)
+        }
+    }
+
+    /// When Autofill asks for Touch ID or the login password.
+    var passwordAutofillAuthentication: PasswordAutofillAuthentication {
+        didSet { Keys.passwordAutofillAuthentication.write(passwordAutofillAuthentication, to: defaults) }
     }
 
     /// Stable per-installation identity, lazily created on first use. Stamped
@@ -461,14 +541,14 @@ final class Preferences {
     /// Slide the hidden sidebar out while the pointer sits at the window's
     /// leading edge, and back in when it leaves (`MainWindow`'s hover peek).
     var peekSidebarWhenHidden: Bool {
-        didSet { defaults.set(peekSidebarWhenHidden, forKey: Keys.peekSidebarWhenHidden) }
+        didSet { Keys.peekSidebarWhenHidden.write(peekSidebarWhenHidden, to: defaults) }
     }
 
     /// Last width the user dragged the sidebar to, seeded into the column's
     /// `ideal` at launch. We persist it ourselves because SwiftUI's own
     /// autosave never survives a relaunch — see `MainWindow.sidebarWidth`.
     var sidebarWidth: Double {
-        didSet { defaults.set(sidebarWidth, forKey: Keys.sidebarWidth) }
+        didSet { Keys.sidebarWidth.write(sidebarWidth, to: defaults) }
     }
 
     /// `sidebarWidth` as it stood at launch, frozen. What the restore must
@@ -480,8 +560,8 @@ final class Preferences {
     /// Bounds of the sidebar column, shared by the persisted width's clamp and
     /// `MainWindow`'s `navigationSplitViewColumnWidth` so a stored value can
     /// never fall outside what the column accepts.
-    static let sidebarWidthRange: ClosedRange<Double> = 140 ... 400
-    static let defaultSidebarWidth: Double = 220
+    nonisolated static let sidebarWidthRange: ClosedRange<Double> = 140 ... 400
+    nonisolated static let defaultSidebarWidth: Double = 220
 
     /// Which appcast channel auto-updates come from. Read by `Updater`'s
     /// `allowedChannels(for:)`, so `.beta`/`.tip` make the matching prerelease
@@ -495,7 +575,7 @@ final class Preferences {
     /// Sparkle reads `allowedChannels` fresh on every check, so changing this
     /// takes effect on the next check with no restart.
     var updateChannel: UpdateChannel {
-        didSet { defaults.set(updateChannel.rawValue, forKey: Keys.updateChannel) }
+        didSet { Keys.updateChannel.write(updateChannel, to: defaults) }
     }
 
     // MARK: - Hotkeys
@@ -521,11 +601,11 @@ final class Preferences {
     // MARK: - Toolbar
 
     var tabSwitcherVisibility: TabSwitcherVisibility {
-        didSet { defaults.set(tabSwitcherVisibility.rawValue, forKey: Keys.tabSwitcherVisibility) }
+        didSet { Keys.tabSwitcherVisibility.write(tabSwitcherVisibility, to: defaults) }
     }
 
     var tabSwitcherPosition: TabSwitcherPosition {
-        didSet { defaults.set(tabSwitcherPosition.rawValue, forKey: Keys.tabSwitcherPosition) }
+        didSet { Keys.tabSwitcherPosition.write(tabSwitcherPosition, to: defaults) }
     }
 
     /// Sentinel for "no icon" — sidebar rows skip the leading glyph when set.
@@ -589,7 +669,7 @@ final class Preferences {
     /// resync.
     var windowOpacity: Double {
         didSet {
-            defaults.set(windowOpacity, forKey: Keys.windowOpacity)
+            Keys.windowOpacity.write(windowOpacity, to: defaults)
             notifyWindowAppearanceChanged()
             scheduleGhosttyConfigReload()
         }
@@ -598,7 +678,7 @@ final class Preferences {
     /// CGSSetWindowBackgroundBlurRadius value (0–100). 0 = no blur.
     var windowBlurRadius: Int {
         didSet {
-            defaults.set(windowBlurRadius, forKey: Keys.windowBlurRadius)
+            Keys.windowBlurRadius.write(windowBlurRadius, to: defaults)
             notifyWindowAppearanceChanged()
         }
     }
@@ -611,7 +691,7 @@ final class Preferences {
     /// look.
     var windowGlassEnabled: Bool {
         didSet {
-            defaults.set(windowGlassEnabled, forKey: Keys.windowGlassEnabled)
+            Keys.windowGlassEnabled.write(windowGlassEnabled, to: defaults)
             notifyWindowAppearanceChanged()
         }
     }
@@ -621,7 +701,7 @@ final class Preferences {
     /// effect unless glass is enabled.
     var windowGlassStyle: WindowGlassStyle {
         didSet {
-            defaults.set(windowGlassStyle.rawValue, forKey: Keys.windowGlassStyle)
+            Keys.windowGlassStyle.write(windowGlassStyle, to: defaults)
             notifyWindowAppearanceChanged()
         }
     }
@@ -632,7 +712,7 @@ final class Preferences {
     /// they explicitly opt in.
     var adaptiveTerminalChromeEnabled: Bool {
         didSet {
-            defaults.set(adaptiveTerminalChromeEnabled, forKey: Keys.adaptiveTerminalChromeEnabled)
+            Keys.adaptiveTerminalChromeEnabled.write(adaptiveTerminalChromeEnabled, to: defaults)
             if adaptiveTerminalChromeEnabled {
                 AdaptiveTerminalChrome.shared.preferenceDidEnable()
             } else {
@@ -651,7 +731,7 @@ final class Preferences {
     /// window keeps its normal style mask, so edge-resizing still works.
     var hideTitleBar: Bool {
         didSet {
-            defaults.set(hideTitleBar, forKey: Keys.hideTitleBar)
+            Keys.hideTitleBar.write(hideTitleBar, to: defaults)
         }
     }
 
@@ -679,7 +759,7 @@ final class Preferences {
     /// name something a flagged keybind simply keeps firing its action.
     var passthroughPrograms: String {
         didSet {
-            defaults.set(passthroughPrograms, forKey: Keys.passthroughPrograms)
+            Keys.passthroughPrograms.write(passthroughPrograms, to: defaults)
         }
     }
 
@@ -726,12 +806,12 @@ final class Preferences {
 
     /// Fraction of screen width (0–1).
     var quickTerminalWidthFraction: Double {
-        didSet { defaults.set(quickTerminalWidthFraction, forKey: Keys.quickTerminalWidth) }
+        didSet { Keys.quickTerminalWidth.write(quickTerminalWidthFraction, to: defaults) }
     }
 
     /// Fraction of screen height (0–1).
     var quickTerminalHeightFraction: Double {
-        didSet { defaults.set(quickTerminalHeightFraction, forKey: Keys.quickTerminalHeight) }
+        didSet { Keys.quickTerminalHeight.write(quickTerminalHeightFraction, to: defaults) }
     }
 
     /// How the panel's position is decided at show time: `fixed` anchors it
@@ -739,7 +819,7 @@ final class Preferences {
     /// the panel where the user last dragged it. Defaults to `fixed` with
     /// centered sliders — the classic quick-terminal contract.
     var quickTerminalPositionMode: QuickTerminalAdjustMode {
-        didSet { defaults.set(quickTerminalPositionMode.rawValue, forKey: Keys.quickTerminalPositionMode) }
+        didSet { Keys.quickTerminalPositionMode.write(quickTerminalPositionMode, to: defaults) }
     }
 
     /// Fixed-position anchors, as the panel origin's place within the screen's
@@ -747,18 +827,18 @@ final class Preferences {
     /// space — 0 = bottom, 1 = top; the Settings slider reads Top…Bottom and
     /// inverts. 0.5/0.5 = centered.
     var quickTerminalFixedX: Double {
-        didSet { defaults.set(quickTerminalFixedX, forKey: Keys.quickTerminalFixedX) }
+        didSet { Keys.quickTerminalFixedX.write(quickTerminalFixedX, to: defaults) }
     }
 
     var quickTerminalFixedY: Double {
-        didSet { defaults.set(quickTerminalFixedY, forKey: Keys.quickTerminalFixedY) }
+        didSet { Keys.quickTerminalFixedY.write(quickTerminalFixedY, to: defaults) }
     }
 
     /// How the panel's size is decided at show time: `fixed` uses the
     /// width/height sliders; `dynamic` makes the panel edge-resizable and
     /// reopens it at the size the user last resized it to.
     var quickTerminalSizeMode: QuickTerminalAdjustMode {
-        didSet { defaults.set(quickTerminalSizeMode.rawValue, forKey: Keys.quickTerminalSizeMode) }
+        didSet { Keys.quickTerminalSizeMode.write(quickTerminalSizeMode, to: defaults) }
     }
 
     /// The panel size the user last resized to, as fractions of the screen's
@@ -766,11 +846,11 @@ final class Preferences {
     var quickTerminalDynamicSize: CGSize? {
         didSet {
             if let size = quickTerminalDynamicSize {
-                defaults.set(Double(size.width), forKey: Keys.quickTerminalDynamicWidth)
-                defaults.set(Double(size.height), forKey: Keys.quickTerminalDynamicHeight)
+                Keys.quickTerminalDynamicWidth.write(Double(size.width), to: defaults)
+                Keys.quickTerminalDynamicHeight.write(Double(size.height), to: defaults)
             } else {
-                defaults.removeObject(forKey: Keys.quickTerminalDynamicWidth)
-                defaults.removeObject(forKey: Keys.quickTerminalDynamicHeight)
+                Keys.quickTerminalDynamicWidth.remove(from: defaults)
+                Keys.quickTerminalDynamicHeight.remove(from: defaults)
             }
         }
     }
@@ -784,11 +864,11 @@ final class Preferences {
     var quickTerminalPosition: CGPoint? {
         didSet {
             if let position = quickTerminalPosition {
-                defaults.set(Double(position.x), forKey: Keys.quickTerminalPositionX)
-                defaults.set(Double(position.y), forKey: Keys.quickTerminalPositionY)
+                Keys.quickTerminalPositionX.write(Double(position.x), to: defaults)
+                Keys.quickTerminalPositionY.write(Double(position.y), to: defaults)
             } else {
-                defaults.removeObject(forKey: Keys.quickTerminalPositionX)
-                defaults.removeObject(forKey: Keys.quickTerminalPositionY)
+                Keys.quickTerminalPositionX.remove(from: defaults)
+                Keys.quickTerminalPositionY.remove(from: defaults)
             }
         }
     }
@@ -797,7 +877,13 @@ final class Preferences {
 
     /// Persisted so the app re-opens to the last-used project on launch.
     var activeProjectID: UUID? {
-        didSet { defaults.set(activeProjectID?.uuidString, forKey: Keys.activeProjectID) }
+        didSet {
+            if let id = activeProjectID {
+                Keys.activeProjectID.write(id.uuidString, to: defaults)
+            } else {
+                Keys.activeProjectID.remove(from: defaults)
+            }
+        }
     }
 
     // MARK: - Init
@@ -831,44 +917,40 @@ final class Preferences {
 
     private init(defaults: UserDefaults) {
         self.defaults = defaults
-        autoTilingEnabled = defaults.bool(forKey: Keys.autoTiling)
-        smoothScrolling = defaults.object(forKey: Keys.smoothScrolling) as? Bool ?? false
-        smoothCursor = defaults.object(forKey: Keys.smoothCursor) as? Bool ?? false
-        cursorTrail = defaults.object(forKey: Keys.cursorTrail) as? Bool ?? false
-        animatedSplits = defaults.object(forKey: Keys.animatedSplits) as? Bool ?? false
-        sidebarPeekStyle = (defaults.string(forKey: Keys.sidebarPeekStyle))
-            .flatMap(SidebarPeekStyle.init(rawValue:)) ?? .resizeTerminal
-        workspaceTabLayout = (defaults.string(forKey: Keys.workspaceTabLayout))
-            .flatMap(WorkspaceTabLayout.init(rawValue:)) ?? .vertical
-        windowOpacity = (defaults.object(forKey: Keys.windowOpacity) as? Double) ?? 1.0
-        windowBlurRadius = defaults.integer(forKey: Keys.windowBlurRadius)
-        windowGlassEnabled = defaults.object(forKey: Keys.windowGlassEnabled) as? Bool ?? false
-        windowGlassStyle = (defaults.string(forKey: Keys.windowGlassStyle))
-            .flatMap(WindowGlassStyle.init(rawValue:)) ?? .regular
-        adaptiveTerminalChromeEnabled = defaults.object(forKey: Keys.adaptiveTerminalChromeEnabled) as? Bool ?? false
-        hideTitleBar = defaults.object(forKey: Keys.hideTitleBar) as? Bool ?? false
+        autoTilingEnabled = Keys.autoTiling.read(defaults)
+        smoothScrolling = Keys.smoothScrolling.read(defaults)
+        snapScrollToRow = Keys.snapScrollToRow.read(defaults)
+        smoothCursor = Keys.smoothCursor.read(defaults)
+        cursorTrail = Keys.cursorTrail.read(defaults)
+        animatedSplits = Keys.animatedSplits.read(defaults)
+        sidebarPeekStyle = Keys.sidebarPeekStyle.read(defaults)
+        workspaceTabLayout = Keys.workspaceTabLayout.read(defaults)
+        windowOpacity = Keys.windowOpacity.read(defaults)
+        windowBlurRadius = Keys.windowBlurRadius.read(defaults)
+        windowGlassEnabled = Keys.windowGlassEnabled.read(defaults)
+        windowGlassStyle = Keys.windowGlassStyle.read(defaults)
+        adaptiveTerminalChromeEnabled = Keys.adaptiveTerminalChromeEnabled.read(defaults)
+        hideTitleBar = Keys.hideTitleBar.read(defaults)
         ghosttyConfigSelection = Self.readGhosttyConfigSelection(from: defaults)
-        passthroughPrograms = defaults.string(forKey: Keys.passthroughPrograms) ?? ""
-        quickTerminalWidthFraction = Self.clampFraction(defaults.double(forKey: Keys.quickTerminalWidth), fallback: 0.6)
-        quickTerminalHeightFraction = Self.clampFraction(defaults.double(forKey: Keys.quickTerminalHeight), fallback: 0.5)
-        quickTerminalPositionMode = (defaults.string(forKey: Keys.quickTerminalPositionMode))
-            .flatMap(QuickTerminalAdjustMode.init(rawValue:)) ?? .fixed
-        quickTerminalFixedX = Self.clampUnitFraction(defaults.object(forKey: Keys.quickTerminalFixedX) as? Double)
-        quickTerminalFixedY = Self.clampUnitFraction(defaults.object(forKey: Keys.quickTerminalFixedY) as? Double)
-        quickTerminalSizeMode = (defaults.string(forKey: Keys.quickTerminalSizeMode))
-            .flatMap(QuickTerminalAdjustMode.init(rawValue:)) ?? .fixed
-        if let w = defaults.object(forKey: Keys.quickTerminalDynamicWidth) as? Double,
-           let h = defaults.object(forKey: Keys.quickTerminalDynamicHeight) as? Double
+        passthroughPrograms = Keys.passthroughPrograms.read(defaults)
+        quickTerminalWidthFraction = Keys.quickTerminalWidth.read(defaults)
+        quickTerminalHeightFraction = Keys.quickTerminalHeight.read(defaults)
+        quickTerminalPositionMode = Keys.quickTerminalPositionMode.read(defaults)
+        quickTerminalFixedX = Keys.quickTerminalFixedX.read(defaults)
+        quickTerminalFixedY = Keys.quickTerminalFixedY.read(defaults)
+        quickTerminalSizeMode = Keys.quickTerminalSizeMode.read(defaults)
+        if let w = Keys.quickTerminalDynamicWidth.readStored(defaults),
+           let h = Keys.quickTerminalDynamicHeight.readStored(defaults)
         {
             quickTerminalDynamicSize = CGSize(
-                width: Self.clampFraction(w, fallback: 0.6),
-                height: Self.clampFraction(h, fallback: 0.5)
+                width: Self.clampFraction(w, fallback: Keys.quickTerminalWidth.defaultValue),
+                height: Self.clampFraction(h, fallback: Keys.quickTerminalHeight.defaultValue)
             )
         } else {
             quickTerminalDynamicSize = nil
         }
-        if let x = defaults.object(forKey: Keys.quickTerminalPositionX) as? Double,
-           let y = defaults.object(forKey: Keys.quickTerminalPositionY) as? Double
+        if let x = Keys.quickTerminalPositionX.readStored(defaults),
+           let y = Keys.quickTerminalPositionY.readStored(defaults)
         {
             // No clamp: out-of-0…1 values are legitimate (panel left
             // overhanging an edge). QuickTerminalPlacement.frame bounds the
@@ -877,59 +959,55 @@ final class Preferences {
         } else {
             quickTerminalPosition = nil
         }
-        activeProjectID = (defaults.string(forKey: Keys.activeProjectID)).flatMap(UUID.init)
-        projectIconSymbol = defaults.string(forKey: Keys.projectIconSymbol) ?? "folder"
-        tabIconSymbol = defaults.string(forKey: Keys.tabIconSymbol) ?? "terminal"
-        sidebarIconSize = (defaults.string(forKey: Keys.sidebarIconSize))
-            .flatMap(SidebarIconSize.init(rawValue:)) ?? .medium
-        showAgentIcons = defaults.object(forKey: Keys.showAgentIcons) as? Bool ?? true
-        showTabStatusIndicator = defaults.object(forKey: Keys.showTabStatusIndicator) as? Bool ?? false
-        showTabSwitcherOverlay = defaults.object(forKey: Keys.showTabSwitcherOverlay) as? Bool ?? true
-        recentTabCandidates = Self.clampRecentTabCandidates(
-            defaults.object(forKey: Keys.recentTabCandidates) as? Int
-        )
-        showSpinnerOverAgentIcons = defaults.object(forKey: Keys.showSpinnerOverAgentIcons) as? Bool ?? true
-        autoNameTabs = defaults.object(forKey: Keys.autoNameTabs) as? Bool ?? true
-        autoAssignProjectColors = defaults.object(forKey: Keys.autoAssignProjectColors) as? Bool ?? false
-        showNewProjectButton = defaults.object(forKey: Keys.showNewProjectButton) as? Bool ?? true
-        showProjectNewTabButton = defaults.object(forKey: Keys.showProjectNewTabButton) as? Bool ?? true
-        backgroundSSHConnections = defaults.object(forKey: Keys.backgroundSSHConnections) as? Bool ?? true
-        reconnectRemotePanes = defaults.object(forKey: Keys.reconnectRemotePanes) as? Bool ?? true
-        peekSidebarWhenHidden = defaults.object(forKey: Keys.peekSidebarWhenHidden) as? Bool ?? true
-        let storedSidebarWidth = Self.clampSidebarWidth(defaults.object(forKey: Keys.sidebarWidth) as? Double)
+        activeProjectID = Keys.activeProjectID.readStored(defaults).flatMap(UUID.init)
+        projectIconSymbol = Keys.projectIconSymbol.read(defaults)
+        tabIconSymbol = Keys.tabIconSymbol.read(defaults)
+        sidebarIconSize = Keys.sidebarIconSize.read(defaults)
+        showAgentIcons = Keys.showAgentIcons.read(defaults)
+        showTabStatusIndicator = Keys.showTabStatusIndicator.read(defaults)
+        showTabSwitcherOverlay = Keys.showTabSwitcherOverlay.read(defaults)
+        recentTabCandidates = Keys.recentTabCandidates.read(defaults)
+        showSpinnerOverAgentIcons = Keys.showSpinnerOverAgentIcons.read(defaults)
+        autoAssignProjectColors = Keys.autoAssignProjectColors.read(defaults)
+        showNewProjectButton = Keys.showNewProjectButton.read(defaults)
+        showProjectNewTabButton = Keys.showProjectNewTabButton.read(defaults)
+        backgroundSSHConnections = Keys.backgroundSSHConnections.read(defaults)
+        reconnectRemotePanes = Keys.reconnectRemotePanes.read(defaults)
+        textFilePlacement = Keys.textFilePlacement.read(defaults)
+        passwordManagerEnabled = Keys.passwordManagerEnabled.read(defaults)
+        disabledPaletteIDs = Keys.disabledPaletteIDs.read(defaults)
+        passwordAutofillAuthentication = Keys.passwordAutofillAuthentication.read(defaults)
+        peekSidebarWhenHidden = Keys.peekSidebarWhenHidden.read(defaults)
+        let storedSidebarWidth = Keys.sidebarWidth.read(defaults)
         sidebarWidth = storedSidebarWidth
         launchSidebarWidth = storedSidebarWidth
-        updateChannel = (defaults.string(forKey: Keys.updateChannel))
-            .flatMap(UpdateChannel.init(rawValue:)) ?? UpdateChannel.bundleDefault
-        tabSwitcherVisibility = (defaults.string(forKey: Keys.tabSwitcherVisibility))
-            .flatMap(TabSwitcherVisibility.init(rawValue:)) ?? .whenMultiple
-        tabSwitcherPosition = (defaults.string(forKey: Keys.tabSwitcherPosition))
-            .flatMap(TabSwitcherPosition.init(rawValue:)) ?? .trailing
+        updateChannel = Keys.updateChannel.read(defaults)
+        tabSwitcherVisibility = Keys.tabSwitcherVisibility.read(defaults)
+        tabSwitcherPosition = Keys.tabSwitcherPosition.read(defaults)
         Self.runOneTimeMigrations(defaults: defaults)
     }
 
-    private static func clampFraction(_ v: Double, fallback: Double) -> Double {
+    nonisolated private static func clampFraction(_ v: Double, fallback: Double) -> Double {
         guard v > 0 else { return fallback }
         return max(0.2, min(1.0, v))
     }
 
     /// Fixed-position anchors: an absent key means centered, and any stored
     /// value is bounded to the 0…1 anchor range.
-    private static func clampUnitFraction(_ v: Double?) -> Double {
-        guard let v else { return 0.5 }
-        return max(0, min(1, v))
+    nonisolated private static func clampUnitFraction(_ v: Double) -> Double {
+        max(0, min(1, v))
     }
 
     /// An absent key (never dragged) and an out-of-range one (a stale value
     /// from a build with different column bounds) both land on the default.
-    static func clampSidebarWidth(_ v: Double?) -> Double {
+    nonisolated static func clampSidebarWidth(_ v: Double?) -> Double {
         guard let v, v > 0 else { return defaultSidebarWidth }
         return min(max(v, sidebarWidthRange.lowerBound), sidebarWidthRange.upperBound)
     }
 
     /// One candidate cannot switch tabs, so a stored `1` reads as the floor.
-    private static func clampRecentTabCandidates(_ v: Int?) -> Int {
-        guard let v, v != unlimitedRecentTabCandidates else { return unlimitedRecentTabCandidates }
+    nonisolated private static func clampRecentTabCandidates(_ v: Int) -> Int {
+        guard v != unlimitedRecentTabCandidates else { return unlimitedRecentTabCandidates }
         return min(max(v, recentTabCandidateRange.lowerBound), recentTabCandidateRange.upperBound)
     }
 
@@ -975,6 +1053,19 @@ final class Preferences {
             defaults.removeObject(forKey: "macterm.intents.shortcutsAccess")
             defaults.set(true, forKey: Keys.migrationRetiredGhosttyOwnedKeys)
         }
+        // Desktop widgets lost their size presets: a new one is always
+        // `DesktopWidgetSpan.initial`, so Settings' default size is dead.
+        if !defaults.bool(forKey: Keys.migrationRetiredWidgetDefaultSize) {
+            defaults.removeObject(forKey: "macterm.desktopWidgets.defaultSize")
+            defaults.set(true, forKey: Keys.migrationRetiredWidgetDefaultSize)
+        }
+        // Tabs are always named after the running program now; the toggle
+        // that could pin the static shell / host name is gone, so its key
+        // is dead.
+        if !defaults.bool(forKey: Keys.migrationRetiredAutoNameTabs) {
+            defaults.removeObject(forKey: "macterm.tabs.autoName")
+            defaults.set(true, forKey: Keys.migrationRetiredAutoNameTabs)
+        }
     }
 
     /// Reads the two-layer config preference. The single-path key came from the
@@ -1000,60 +1091,106 @@ final class Preferences {
 
     // MARK: - UserDefaults keys
 
+    /// Every persisted setting, with its default and normalization. The
+    /// plain strings at the bottom are keys nothing observes — read-through
+    /// state and one-time migration flags — and stay raw.
     enum Keys {
-        static let autoTiling = "macterm.autoTiling.enabled"
-        static let smoothScrolling = "macterm.terminal.smoothScrolling"
-        static let smoothCursor = "macterm.terminal.smoothCursor"
-        static let cursorTrail = "macterm.terminal.cursorTrail"
-        static let animatedSplits = "macterm.terminal.animatedSplits"
-        static let sidebarPeekStyle = "macterm.sidebar.presentation"
-        static let workspaceTabLayout = "macterm.tabs.layout"
-        static let windowOpacity = "macterm.window.opacity"
-        static let windowBlurRadius = "macterm.window.blurRadius"
-        static let windowGlassEnabled = "macterm.window.glassEnabled"
-        static let windowGlassStyle = "macterm.window.glassStyle"
-        static let adaptiveTerminalChromeEnabled = "macterm.window.adaptiveTerminalChromeEnabled"
-        static let hideTitleBar = "macterm.window.hideTitleBar"
+        static let autoTiling = PreferenceStorageKey("macterm.autoTiling.enabled", default: false)
+        static let smoothScrolling = PreferenceStorageKey("macterm.terminal.smoothScrolling", default: true)
+        static let snapScrollToRow = PreferenceStorageKey("macterm.terminal.snapScrollToRow", default: false)
+        static let smoothCursor = PreferenceStorageKey("macterm.terminal.smoothCursor", default: false)
+        static let cursorTrail = PreferenceStorageKey("macterm.terminal.cursorTrail", default: false)
+        static let animatedSplits = PreferenceStorageKey("macterm.terminal.animatedSplits", default: true)
+        static let sidebarPeekStyle = PreferenceStorageKey("macterm.sidebar.presentation", default: SidebarPeekStyle.resizeTerminal)
+        static let workspaceTabLayout = PreferenceStorageKey("macterm.tabs.layout", default: WorkspaceTabLayout.vertical)
+        static let windowOpacity = PreferenceStorageKey("macterm.window.opacity", default: 0.8)
+        static let windowBlurRadius = PreferenceStorageKey("macterm.window.blurRadius", default: 50)
+        static let windowGlassEnabled = PreferenceStorageKey("macterm.window.glassEnabled", default: false)
+        static let windowGlassStyle = PreferenceStorageKey("macterm.window.glassStyle", default: WindowGlassStyle.regular)
+        static let adaptiveTerminalChromeEnabled = PreferenceStorageKey("macterm.window.adaptiveTerminalChromeEnabled", default: false)
+        static let hideTitleBar = PreferenceStorageKey("macterm.window.hideTitleBar", default: false)
+        static let passthroughPrograms = PreferenceStorageKey("macterm.hotkey.passthroughPrograms", default: "")
+        static let quickTerminalWidth = PreferenceStorageKey("macterm.quickTerminal.width", default: 0.6) {
+            clampFraction($0, fallback: 0.6)
+        }
+
+        static let quickTerminalHeight = PreferenceStorageKey("macterm.quickTerminal.height", default: 0.5) {
+            clampFraction($0, fallback: 0.5)
+        }
+
+        static let quickTerminalPositionMode = PreferenceStorageKey(
+            "macterm.quickTerminal.positionMode", default: QuickTerminalAdjustMode.fixed
+        )
+        static let quickTerminalFixedX = PreferenceStorageKey("macterm.quickTerminal.fixedX", default: 0.5, normalize: clampUnitFraction)
+        static let quickTerminalFixedY = PreferenceStorageKey("macterm.quickTerminal.fixedY", default: 0.5, normalize: clampUnitFraction)
+        static let quickTerminalSizeMode = PreferenceStorageKey("macterm.quickTerminal.sizeMode", default: QuickTerminalAdjustMode.fixed)
+        /// Halves of `quickTerminalDynamicSize` / `quickTerminalPosition`;
+        /// read stored-only, since absence means "never resized / moved".
+        static let quickTerminalDynamicWidth = PreferenceStorageKey("macterm.quickTerminal.dynamicWidth", default: 0.0)
+        static let quickTerminalDynamicHeight = PreferenceStorageKey("macterm.quickTerminal.dynamicHeight", default: 0.0)
+        static let quickTerminalPositionX = PreferenceStorageKey("macterm.quickTerminal.positionX", default: 0.0)
+        static let quickTerminalPositionY = PreferenceStorageKey("macterm.quickTerminal.positionY", default: 0.0)
+        /// Stored as the UUID string; absent means no selection.
+        static let activeProjectID = PreferenceStorageKey("macterm.activeProjectID", default: "")
+        static let projectIconSymbol = PreferenceStorageKey("macterm.sidebar.projectIcon", default: "folder")
+        static let tabIconSymbol = PreferenceStorageKey("macterm.sidebar.tabIcon", default: "terminal")
+        static let sidebarIconSize = PreferenceStorageKey("macterm.sidebar.iconSize", default: SidebarIconSize.medium)
+        static let showAgentIcons = PreferenceStorageKey("macterm.sidebar.showAgentIcons", default: true)
+        static let showTabStatusIndicator = PreferenceStorageKey("macterm.sidebar.showTabStatusIndicator", default: false)
+        static let showTabSwitcherOverlay = PreferenceStorageKey("macterm.tabSwitcher.overlay", default: true)
+        static let recentTabCandidates = PreferenceStorageKey(
+            "macterm.tabs.recentTabCandidates", default: unlimitedRecentTabCandidates, normalize: clampRecentTabCandidates
+        )
+        static let showSpinnerOverAgentIcons = PreferenceStorageKey("macterm.sidebar.showSpinnerOverAgentIcons", default: true)
+        static let autoAssignProjectColors = PreferenceStorageKey("macterm.projects.autoAssignColors", default: false)
+        static let showNewProjectButton = PreferenceStorageKey("macterm.sidebar.showNewProjectButton", default: true)
+        static let showProjectNewTabButton = PreferenceStorageKey("macterm.sidebar.showProjectNewTabButton", default: true)
+        static let backgroundSSHConnections = PreferenceStorageKey("macterm.remote.backgroundSSHConnections", default: true)
+        static let reconnectRemotePanes = PreferenceStorageKey("macterm.remote.reconnectDroppedPanes", default: true)
+        static let textFilePlacement = PreferenceStorageKey("macterm.textFiles.placement", default: TextFilePlacement.split)
+        /// The key of the "Offer to save passwords" toggle this replaced, so a
+        /// user who switched that off finds the whole feature off, never on.
+        static let passwordManagerEnabled = PreferenceStorageKey("macterm.passwords.offerToSave", default: true)
+        static let disabledPaletteIDs = PreferenceStorageKey("macterm.palettes.disabled", default: [String]())
+        static let passwordAutofillAuthentication = PreferenceStorageKey(
+            "macterm.passwords.autofillAuthentication", default: PasswordAutofillAuthentication.untilLocked
+        )
+        static let peekSidebarWhenHidden = PreferenceStorageKey("macterm.sidebar.peekWhenHidden", default: true)
+        static let sidebarWidth = PreferenceStorageKey("macterm.sidebar.width", default: defaultSidebarWidth) {
+            clampSidebarWidth($0)
+        }
+
+        static let updateChannel = PreferenceStorageKey("macterm.updates.channel", default: UpdateChannel.bundleDefault)
+        static let tabSwitcherVisibility = PreferenceStorageKey(
+            "macterm.toolbar.tabSwitcherVisibility", default: TabSwitcherVisibility.whenMultiple
+        )
+        static let tabSwitcherPosition = PreferenceStorageKey("macterm.toolbar.tabSwitcherPosition", default: TabSwitcherPosition.trailing)
+
         static let loadsDefaultGhosttyConfigFiles = "macterm.ghostty.loadsDefaultConfigFiles"
         static let customGhosttyConfigPaths = "macterm.ghostty.customConfigPaths"
         /// Legacy single-path key. Read only for migration.
         static let userGhosttyConfigPath = "macterm.ghostty.userConfigPath"
-        static let passthroughPrograms = "macterm.hotkey.passthroughPrograms"
-        static let quickTerminalWidth = "macterm.quickTerminal.width"
-        static let quickTerminalHeight = "macterm.quickTerminal.height"
-        static let quickTerminalPositionMode = "macterm.quickTerminal.positionMode"
-        static let quickTerminalFixedX = "macterm.quickTerminal.fixedX"
-        static let quickTerminalFixedY = "macterm.quickTerminal.fixedY"
-        static let quickTerminalSizeMode = "macterm.quickTerminal.sizeMode"
-        static let quickTerminalDynamicWidth = "macterm.quickTerminal.dynamicWidth"
-        static let quickTerminalDynamicHeight = "macterm.quickTerminal.dynamicHeight"
-        static let quickTerminalPositionX = "macterm.quickTerminal.positionX"
-        static let quickTerminalPositionY = "macterm.quickTerminal.positionY"
-        static let activeProjectID = "macterm.activeProjectID"
-        static let projectIconSymbol = "macterm.sidebar.projectIcon"
-        static let tabIconSymbol = "macterm.sidebar.tabIcon"
-        static let sidebarIconSize = "macterm.sidebar.iconSize"
-        static let showAgentIcons = "macterm.sidebar.showAgentIcons"
-        static let showTabStatusIndicator = "macterm.sidebar.showTabStatusIndicator"
-        static let showTabSwitcherOverlay = "macterm.tabSwitcher.overlay"
-        static let recentTabCandidates = "macterm.tabs.recentTabCandidates"
-        static let showSpinnerOverAgentIcons = "macterm.sidebar.showSpinnerOverAgentIcons"
-        static let autoNameTabs = "macterm.tabs.autoName"
-        static let autoAssignProjectColors = "macterm.projects.autoAssignColors"
-        static let showNewProjectButton = "macterm.sidebar.showNewProjectButton"
-        static let showProjectNewTabButton = "macterm.sidebar.showProjectNewTabButton"
-        static let backgroundSSHConnections = "macterm.remote.backgroundSSHConnections"
-        static let reconnectRemotePanes = "macterm.remote.reconnectDroppedPanes"
         static let installationID = "macterm.installationID"
         static let hasSeededFirstRun = "macterm.firstRun.seeded"
-        static let peekSidebarWhenHidden = "macterm.sidebar.peekWhenHidden"
-        static let sidebarWidth = "macterm.sidebar.width"
-        static let updateChannel = "macterm.updates.channel"
-        static let tabSwitcherVisibility = "macterm.toolbar.tabSwitcherVisibility"
-        static let tabSwitcherPosition = "macterm.toolbar.tabSwitcherPosition"
         static let migrationV2GhosttyConfigOwned = "macterm.migration.v2_ghostty_config_owned"
         static let migrationRetiredToggleKeys = "macterm.migration.retired_toggle_keys"
         static let migrationRetiredPaneDimKey = "macterm.migration.retired_pane_dim_key"
         static let migrationRetiredGhosttyOwnedKeys = "macterm.migration.retired_ghostty_owned_keys"
+        static let migrationRetiredWidgetDefaultSize = "macterm.migration.retired_widget_default_size"
+        static let migrationRetiredAutoNameTabs = "macterm.migration.retired_auto_name_tabs"
     }
 }
+
+// The enums `Preferences` persists by raw value. Declared here, beside the
+// enums, because `PreferenceValue` is `Sendable` and a retroactive `Sendable`
+// must live in the enum's own file.
+extension SidebarPeekStyle: PreferenceValue {}
+extension WorkspaceTabLayout: PreferenceValue {}
+extension WindowGlassStyle: PreferenceValue {}
+extension QuickTerminalAdjustMode: PreferenceValue {}
+extension SidebarIconSize: PreferenceValue {}
+extension UpdateChannel: PreferenceValue {}
+extension PasswordAutofillAuthentication: PreferenceValue {}
+extension TabSwitcherVisibility: PreferenceValue {}
+extension TabSwitcherPosition: PreferenceValue {}
+extension TextFilePlacement: PreferenceValue {}

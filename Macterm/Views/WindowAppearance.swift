@@ -97,48 +97,94 @@ func rendererQuantizedAlpha(_ opacity: Double) -> CGFloat {
     CGFloat(UInt8(clamping: Int(255 * max(0, min(1, opacity))))) / 255
 }
 
+/// A pane's claim on the window tint, in a container's coordinates: the
+/// pane's whole `frame` is cut out of the window tint and refilled with the
+/// pane's own `color` at the window opacity, except under `painted`, where the
+/// terminal's cells already carry that color at that opacity.
+struct TerminalPaintRegion: Equatable {
+    var frame: CGRect
+    var painted: CGRect
+    /// The pure hue; the cutout applies the window opacity itself.
+    var color: CGColor
+
+    /// This region, given in `view`'s coordinates, in its window's.
+    func inWindow(of view: NSView) -> TerminalPaintRegion {
+        TerminalPaintRegion(frame: view.convert(frame, to: nil), painted: view.convert(painted, to: nil), color: color)
+    }
+
+    /// This region, given in window coordinates, in `view`'s.
+    func fromWindow(into view: NSView) -> TerminalPaintRegion {
+        TerminalPaintRegion(frame: view.convert(frame, from: nil), painted: view.convert(painted, from: nil), color: color)
+    }
+}
+
 /// The cut a window's tinted backdrop takes where a terminal is painting its
-/// own background at the window opacity.
+/// own background at the window opacity, and the pane-colored tint that
+/// replaces it around that paint.
 ///
-/// Both translucency paths need it for the same reason. The tint is one layer
-/// at `opacity`; a TUI's cells are a second layer at the same `opacity` on top
-/// of it, so the pane composites to `1-(1-opacity)²` while the chrome beside it
-/// stays at plain `opacity` — the pane reads near-solid next to a translucent
-/// app. Cutting the tint under the paint leaves exactly one tinted layer
-/// everywhere: the terminal's own inside the paint, the backdrop's outside it.
-/// Only the tint is cut, never the material or blur behind it, so both
-/// surfaces keep the same backdrop.
+/// Both translucency paths need the cut for the same reason. The tint is one
+/// layer at `opacity`; a TUI's cells are a second layer at the same `opacity`
+/// on top of it, so the pane composites to `1-(1-opacity)²` while the chrome
+/// beside it stays at plain `opacity` — the pane reads near-solid next to a
+/// translucent app. Cutting the tint under the paint leaves exactly one tinted
+/// layer everywhere: the terminal's own inside the paint, the backdrop's
+/// outside it. Only the tint is cut, never the material or blur behind it, so
+/// both surfaces keep the same backdrop.
+///
+/// The refill is what gives a pane its *padding*. libghostty leaves
+/// `window-padding` unpainted, so inside the paint the pane shows the TUI's
+/// color and in the margin around it whatever the window tint is — the TUI's
+/// color only while a lone pane has lent it to the whole window. In a split
+/// the window keeps the configured theme, and every pane's margin showed that
+/// theme as a frame around the TUI. So the cut is the whole pane, and the
+/// margin is refilled with the pane's own color at the same opacity, on a
+/// sibling layer the mask doesn't reach. The refill is cut under the paint
+/// for the same double-layer reason the tint is.
 struct TintCutout {
     private let mask = CAShapeLayer()
-    private var holes: [CGRect] = []
+    private var regions: [TerminalPaintRegion] = []
 
     /// Returns true when the regions actually changed — this runs on every
-    /// sample, and rebuilding an identical mask is wasted render work.
-    mutating func set(_ rects: [CGRect]) -> Bool {
-        guard rects != holes else { return false }
-        holes = rects
+    /// sample, and rebuilding identical layers is wasted render work.
+    mutating func set(_ regions: [TerminalPaintRegion]) -> Bool {
+        guard regions != self.regions else { return false }
+        self.regions = regions
         return true
     }
 
-    /// Cut `view` (a tinted layer) to the regions, which are in `container`'s
-    /// coordinates.
+    /// Cut `tint` (a tinted layer) around the regions and lay their refills on
+    /// `refill`, a sibling above it. Regions are in `container`'s coordinates;
+    /// `alpha` is the opacity the tint itself is drawn at.
     @MainActor
-    func apply(to view: NSView, in container: NSView) {
-        guard let layer = view.layer else { return }
-        guard !holes.isEmpty else {
+    func apply(to tint: NSView, refill: NSView, alpha: CGFloat, in container: NSView) {
+        refill.layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
+        guard let layer = tint.layer else { return }
+        guard !regions.isEmpty else {
             layer.mask = nil
             return
         }
         let path = CGMutablePath()
-        path.addRect(view.bounds)
-        for hole in holes {
-            path.addRect(view.convert(hole, from: container))
+        path.addRect(tint.bounds)
+        for region in regions {
+            path.addRect(tint.convert(region.frame, from: container))
         }
-        mask.frame = view.bounds
+        mask.frame = tint.bounds
         mask.fillRule = .evenOdd
         mask.fillColor = NSColor.black.cgColor
         mask.path = path
         layer.mask = mask
+
+        for region in regions {
+            let margin = CAShapeLayer()
+            let outline = CGMutablePath()
+            outline.addRect(refill.convert(region.frame, from: container))
+            outline.addRect(refill.convert(region.painted, from: container))
+            margin.frame = refill.bounds
+            margin.fillRule = .evenOdd
+            margin.fillColor = region.color.copy(alpha: alpha)
+            margin.path = outline
+            refill.layer?.addSublayer(margin)
+        }
     }
 }
 
@@ -151,8 +197,11 @@ struct TintCutout {
 /// it, and mirrors how the glass path installs `MactermGlassView`.
 final class MactermTintBackdropView: NSView {
     private let tintView = NSView()
+    /// The pane-colored refills of `TintCutout`, above the (masked) tint.
+    private let refillView = NSView()
     private var topConstraint: NSLayoutConstraint!
     private var cutout = TintCutout()
+    private var tintAlpha: CGFloat = 1
 
     init(topOffset: CGFloat) {
         super.init(frame: .zero)
@@ -166,6 +215,15 @@ final class MactermTintBackdropView: NSView {
             tintView.leadingAnchor.constraint(equalTo: leadingAnchor),
             tintView.bottomAnchor.constraint(equalTo: bottomAnchor),
             tintView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        refillView.translatesAutoresizingMaskIntoConstraints = false
+        refillView.wantsLayer = true
+        addSubview(refillView, positioned: .above, relativeTo: tintView)
+        NSLayoutConstraint.activate([
+            refillView.topAnchor.constraint(equalTo: tintView.topAnchor),
+            refillView.leadingAnchor.constraint(equalTo: tintView.leadingAnchor),
+            refillView.bottomAnchor.constraint(equalTo: tintView.bottomAnchor),
+            refillView.trailingAnchor.constraint(equalTo: tintView.trailingAnchor),
         ])
     }
 
@@ -184,20 +242,25 @@ final class MactermTintBackdropView: NSView {
     }
 
     func configure(backgroundColor: NSColor, backgroundOpacity: Double, cornerRadius: CGFloat?) {
+        tintAlpha = rendererQuantizedAlpha(backgroundOpacity)
         tintView.layer?.backgroundColor = backgroundColor
-            .withAlphaComponent(rendererQuantizedAlpha(backgroundOpacity))
+            .withAlphaComponent(tintAlpha)
             .cgColor
         tintView.layer?.cornerRadius = cornerRadius ?? 0
+        // The system's corners are continuous. Inside a titled window the
+        // window's own mask decides the visible shape either way; on a
+        // borderless desktop widget this layer IS the shape.
+        tintView.layer?.cornerCurve = .continuous
     }
 
-    func setTintHoles(_ rects: [CGRect]) {
-        guard cutout.set(rects) else { return }
-        cutout.apply(to: tintView, in: self)
+    func setPaintRegions(_ regions: [TerminalPaintRegion]) {
+        guard cutout.set(regions) else { return }
+        cutout.apply(to: tintView, refill: refillView, alpha: tintAlpha, in: self)
     }
 
     override func layout() {
         super.layout()
-        cutout.apply(to: tintView, in: self)
+        cutout.apply(to: tintView, refill: refillView, alpha: tintAlpha, in: self)
     }
 }
 
@@ -231,8 +294,11 @@ final class MactermTintBackdropView: NSView {
 final class MactermGlassView: NSView {
     private let glassEffectView = NSGlassEffectView()
     private let tintView = NSView()
+    /// The pane-colored refills of `TintCutout`, above the (masked) tint.
+    private let refillView = NSView()
     private var topConstraint: NSLayoutConstraint!
     private var tintCutout = TintCutout()
+    private var tintAlpha: CGFloat = 1
 
     init(topOffset: CGFloat) {
         super.init(frame: .zero)
@@ -264,6 +330,15 @@ final class MactermGlassView: NSView {
             tintView.bottomAnchor.constraint(equalTo: glassEffectView.bottomAnchor),
             tintView.trailingAnchor.constraint(equalTo: glassEffectView.trailingAnchor),
         ])
+        refillView.translatesAutoresizingMaskIntoConstraints = false
+        refillView.wantsLayer = true
+        addSubview(refillView, positioned: .above, relativeTo: tintView)
+        NSLayoutConstraint.activate([
+            refillView.topAnchor.constraint(equalTo: tintView.topAnchor),
+            refillView.leadingAnchor.constraint(equalTo: tintView.leadingAnchor),
+            refillView.bottomAnchor.constraint(equalTo: tintView.bottomAnchor),
+            refillView.trailingAnchor.constraint(equalTo: tintView.trailingAnchor),
+        ])
     }
 
     @available(*, unavailable)
@@ -279,31 +354,34 @@ final class MactermGlassView: NSView {
     ) {
         glassEffectView.style = style
         glassEffectView.cornerRadius = cornerRadius ?? 0
+        tintAlpha = rendererQuantizedAlpha(backgroundOpacity)
         tintView.layer?.backgroundColor = backgroundColor
-            .withAlphaComponent(rendererQuantizedAlpha(backgroundOpacity))
+            .withAlphaComponent(tintAlpha)
             .cgColor
         tintView.layer?.cornerRadius = cornerRadius ?? 0
+        tintView.layer?.cornerCurve = .continuous
     }
 
     func updateTopInset(_ offset: CGFloat) {
         topConstraint.constant = offset
     }
 
-    /// Cut the tint away under regions a terminal is already painting itself at
-    /// the window opacity (`rects` in this view's coordinates). The glass
-    /// material stays, so the pane and the chrome sit on the same backdrop.
-    func setTintHoles(_ rects: [CGRect]) {
-        guard tintCutout.set(rects) else { return }
-        applyTintHoles()
+    /// Cut the tint away under panes painting their own background at the
+    /// window opacity, and refill their margins in their own colors (`regions`
+    /// in this view's coordinates). The glass material stays, so the pane and
+    /// the chrome sit on the same backdrop.
+    func setPaintRegions(_ regions: [TerminalPaintRegion]) {
+        guard tintCutout.set(regions) else { return }
+        applyPaintRegions()
     }
 
     override func layout() {
         super.layout()
-        applyTintHoles()
+        applyPaintRegions()
     }
 
-    private func applyTintHoles() {
-        tintCutout.apply(to: tintView, in: self)
+    private func applyPaintRegions() {
+        tintCutout.apply(to: tintView, refill: refillView, alpha: tintAlpha, in: self)
     }
 }
 
@@ -364,7 +442,7 @@ enum WindowAppearance {
                 window.backgroundColor = .clear
                 setWindowBackgroundBlur(window, radius: 0)
                 removeTintBackdrop(window: window)
-                syncGlass(window: window, backgroundColor: bg, opacity: opacity)
+                syncGlass(window: window, backgroundColor: bg, opacity: opacity, cornerRadius: windowCornerRadius(window))
             } else {
                 // One tinted layer for the whole interior — including the strip
                 // around the system glass sidebar — so it reads as a single
@@ -377,7 +455,12 @@ enum WindowAppearance {
                 // Apply blur unconditionally; passing 0 clears any previous blur.
                 setWindowBackgroundBlur(window, radius: blurRadius)
                 removeGlass(window: window)
-                syncTintBackdrop(window: window, backgroundColor: bg, opacity: opacity)
+                syncTintBackdrop(
+                    window: window,
+                    backgroundColor: bg,
+                    opacity: opacity,
+                    cornerRadius: windowCornerRadius(window)
+                )
             }
         } else {
             window.isOpaque = true
@@ -651,7 +734,9 @@ enum WindowAppearance {
     /// so SwiftUI's address-bearing name (see above) doesn't just fail to
     /// restore — it writes a **brand-new key on every launch**, forever. They
     /// accumulate unread: 9 in one release domain, 51 in a debug one. Pinning
-    /// the name gives AppKit a single key it rewrites in place.
+    /// the name gives AppKit a single key it rewrites in place. The window's
+    /// own frame autosave had the same name and the same problem (#496); see
+    /// `disownFrameAutosave`.
     ///
     /// This is hygiene, not the restore: `restoreSidebarWidth` above stays the
     /// authority on the launch width, because when AppKit consults its own
@@ -665,7 +750,7 @@ enum WindowAppearance {
     /// One shared name would have every window writing its frames to the same
     /// AppKit key, so they fight. A per-window name has to stay BOUNDED,
     /// though — an unstable one is exactly what produced the unbounded
-    /// `NSSplitView Subview Frames` accumulation `pruneChurnedSidebarAutosaveKeys`
+    /// `NSSplitView Subview Frames` accumulation `pruneChurnedAutosaveKeys`
     /// below exists to clean up (49 keys in one real domain, one per launch).
     /// A reused slot index is bounded by how many windows are open at once; a
     /// UUID per window would not be.
@@ -696,7 +781,7 @@ enum WindowAppearance {
         let name = autosaveName(forSlot: sidebarAutosaveSlot(for: window))
         guard split.autosaveName != name else { return }
         split.autosaveName = name
-        pruneChurnedSidebarAutosaveKeys()
+        pruneChurnedAutosaveKeys()
     }
 
     /// Drop the frames AppKit autosaved for a closed window's slot.
@@ -706,7 +791,7 @@ enum WindowAppearance {
     /// how a new window inherited a closed window's collapsed sidebar and
     /// width. Skipped while terminating: the launch path still reads slot 0
     /// before the window's own record takes over. Reads `UserDefaults.standard`
-    /// for the same reason `pruneChurnedSidebarAutosaveKeys` does — that is
+    /// for the same reason `pruneChurnedAutosaveKeys` does — that is
     /// the only domain AppKit wrote it to — and is likewise skipped under a
     /// test run.
     private static func clearSidebarAutosave(slot: Int) {
@@ -714,25 +799,89 @@ enum WindowAppearance {
         UserDefaults.standard.removeObject(forKey: "NSSplitView Subview Frames \(autosaveName(forSlot: slot))")
     }
 
-    /// Drop the per-launch keys written before the name was pinned. Matched on
-    /// the address marker, so the stable names (ours, and the Settings
-    /// window's `com_apple_SwiftUI_Settings_window…`) are never touched.
+    /// Drop the per-launch keys SwiftUI's address-bearing names left behind:
+    /// the sidebar's `NSSplitView Subview Frames …` from before the name was
+    /// pinned, and every `NSWindow Frame …` the main window ever wrote (239 in
+    /// one release domain, over a thousand in a debug one — one per launch).
+    /// Matched on the address marker, so the stable names (ours, and the
+    /// Settings window's `com_apple_SwiftUI_Settings_window…`) are never
+    /// touched.
     ///
     /// Reads `UserDefaults.standard` deliberately, against the usual rule:
     /// AppKit wrote these keys to the app's real domain, so that is the only
     /// place they exist. Skipped under a test run so a hosted suite can't
     /// reach into the developer's live domain.
-    private static func pruneChurnedSidebarAutosaveKeys() {
+    private static func pruneChurnedAutosaveKeys() {
         guard !Preferences.isTestRun else { return }
         let defaults = UserDefaults.standard
-        let stale = defaults.dictionaryRepresentation().keys.filter {
-            $0.hasPrefix("NSSplitView Subview Frames ") && $0.contains("(unknown context at $")
+        let stale = defaults.dictionaryRepresentation().keys.filter { key in
+            (key.hasPrefix("NSSplitView Subview Frames ") || key.hasPrefix("NSWindow Frame "))
+                && key.contains("(unknown context at $")
         }
         guard !stale.isEmpty else { return }
         for key in stale {
             defaults.removeObject(forKey: key)
         }
-        logger.info("pruned \(stale.count, privacy: .public) churned sidebar autosave keys")
+        logger.info("pruned \(stale.count, privacy: .public) churned autosave keys")
+    }
+
+    /// Stop AppKit autosaving this window's frame under SwiftUI's name.
+    ///
+    /// SwiftUI names a `WindowGroup` window's frame autosave after the scene's
+    /// whole content type, in which a private type — `AppColorScheme` today,
+    /// and SwiftUI's own `ActionsModifier` back when the alerts sat in the
+    /// scene closure — prints as `(unknown context at $ADDR)`: an address that
+    /// moves every launch with ASLR. So the frame was saved under a new key on
+    /// every launch and never read back, and every window opened at the
+    /// scene's `defaultSize` (#496).
+    ///
+    /// A stable name would not have been enough. Measured with
+    /// `AppColorScheme` made internal: the first window then came back at its
+    /// frame, but every window of the group wrote that one `AppWindow-1` key
+    /// (each window is NAMED `AppWindow-N`, yet only `-1` is ever written), so
+    /// SwiftUI keeps one frame per group — the last window moved — and every
+    /// other restored window opened at the default size. The key also changes
+    /// whenever the scene closure's modifiers do, resetting everyone's size.
+    /// The frame is persisted per window in `WindowSnapshot` instead
+    /// (`restoreFrame`), and AppKit's autosave is switched off: one owner.
+    static func disownFrameAutosave(window: NSWindow) {
+        guard !window.frameAutosaveName.isEmpty else { return }
+        window.setFrameAutosaveName("")
+        pruneChurnedAutosaveKeys()
+    }
+
+    /// Reopen a restored window at its saved frame. `setFrame(from:)` is the
+    /// call AppKit's own autosave restores through: the descriptor carries the
+    /// screen the frame was saved on, and AppKit fits it to the current
+    /// displays.
+    ///
+    /// Not every saved frame can be fitted, though: a window manager parks
+    /// windows on a hidden workspace just off a screen's corner (AeroSpace
+    /// leaves 1pt showing), and that is the frame the move reports. A restored
+    /// frame with too little of itself on any screen keeps its size and is
+    /// centered on the main screen instead.
+    static func restoreFrame(_ descriptor: String, window: NSWindow) {
+        guard !window.styleMask.contains(.fullScreen) else { return }
+        window.setFrame(from: descriptor)
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        if !DesktopWidgetGrid.isReachable(window.frame, on: visibleFrames),
+           let screen = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+        {
+            let size = CGSize(
+                width: min(window.frame.width, screen.width),
+                height: min(window.frame.height, screen.height)
+            )
+            let centered = CGRect(
+                x: screen.midX - size.width / 2,
+                y: screen.midY - size.height / 2,
+                width: size.width,
+                height: size.height
+            )
+            window.setFrame(centered, display: false)
+            logger.info("saved window frame \(descriptor, privacy: .public) is off screen; centered it")
+            return
+        }
+        logger.info("window frame restored to \(descriptor, privacy: .public)")
     }
 
     /// Kill NSSplitView's windowed "proactive peek" of the collapsed sidebar:
@@ -812,12 +961,12 @@ enum WindowAppearance {
                 panel.backgroundColor = .clear
                 setWindowBackgroundBlur(panel, radius: 0)
                 removeTintBackdrop(window: panel)
-                syncGlass(window: panel, backgroundColor: bg, opacity: opacity)
+                syncGlass(window: panel, backgroundColor: bg, opacity: opacity, cornerRadius: windowCornerRadius(panel))
             } else {
                 panel.backgroundColor = .clear
                 setWindowBackgroundBlur(panel, radius: Preferences.shared.windowBlurRadius)
                 removeGlass(window: panel)
-                syncTintBackdrop(window: panel, backgroundColor: bg, opacity: opacity)
+                syncTintBackdrop(window: panel, backgroundColor: bg, opacity: opacity, cornerRadius: windowCornerRadius(panel))
             }
         } else {
             panel.isOpaque = true
@@ -828,22 +977,55 @@ enum WindowAppearance {
         }
     }
 
-    /// Hand the window's tinted backdrop the regions a terminal is painting
-    /// itself, in window coordinates, so the tint is cut away there. An opaque
+    /// The desktop-widget variant of `syncPanel`. A widget's shape is its
+    /// backdrop — a borderless window has no system corner or mask — so it is
+    /// never an opaque window: at full opacity the backdrop is simply an
+    /// opaque rounded fill, and the corners outside it stay clear. Glass and
+    /// tint take the widget's continuous corner (`DesktopWidgetMetrics`), and
+    /// the CGS blur follows the window's shape, which the panel's own corner
+    /// mask sets to that same corner (`DesktopWidgetPanel.cornerMask`).
+    static func syncDesktopWidget(_ panel: NSPanel) {
+        let opacity = Preferences.shared.windowOpacity
+        let bg = MactermTheme.nsConfiguredBg
+        let radius = DesktopWidgetMetrics.cornerRadius
+        let isTransparent = opacity < 1.0
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        if glassSupported, Preferences.shared.windowGlassEnabled, isTransparent {
+            setWindowBackgroundBlur(panel, radius: 0)
+            removeTintBackdrop(window: panel)
+            syncGlass(window: panel, backgroundColor: bg, opacity: opacity, cornerRadius: radius)
+        } else {
+            setWindowBackgroundBlur(panel, radius: isTransparent ? Preferences.shared.windowBlurRadius : 0)
+            removeGlass(window: panel)
+            syncTintBackdrop(window: panel, backgroundColor: bg, opacity: opacity, cornerRadius: radius)
+        }
+        // The shadow follows the window's alpha, which just changed shape.
+        panel.invalidateShadow()
+    }
+
+    /// Hand the window's tinted backdrop the panes painting their own
+    /// background, in window coordinates, so the tint is cut away under them
+    /// and their margins refilled in their colors (`TintCutout`). An opaque
     /// window has no tint to cut and is left alone.
-    static func updateTerminalPaintRegions(in window: NSWindow?, rects: [CGRect]) {
+    static func updateTerminalPaintRegions(in window: NSWindow?, regions: [TerminalPaintRegion]) {
         guard let window else { return }
         if glassSupported, #available(macOS 26.0, *), let glass = existingGlass(in: window) {
-            glass.setTintHoles(rects.map { glass.convert($0, from: nil) })
+            glass.setPaintRegions(regions.map { $0.fromWindow(into: glass) })
         }
         guard let backdrop = existingTintBackdrop(in: window) else { return }
-        backdrop.setTintHoles(rects.map { backdrop.convert($0, from: nil) })
+        backdrop.setPaintRegions(regions.map { $0.fromWindow(into: backdrop) })
     }
 
     /// Install (if needed) and configure the flat tinted backdrop for the
     /// non-glass translucency path. Same placement as the glass view: below the
     /// content view, filling the window including the area under the titlebar.
-    private static func syncTintBackdrop(window: NSWindow, backgroundColor: NSColor, opacity: Double) {
+    private static func syncTintBackdrop(
+        window: NSWindow,
+        backgroundColor: NSColor,
+        opacity: Double,
+        cornerRadius: CGFloat?
+    ) {
         guard let contentView = window.contentView, let themeFrame = contentView.superview else { return }
 
         let backdrop = existingTintBackdrop(in: window) ?? {
@@ -862,7 +1044,7 @@ enum WindowAppearance {
         backdrop.configure(
             backgroundColor: backgroundColor,
             backgroundOpacity: opacity,
-            cornerRadius: windowCornerRadius(window)
+            cornerRadius: cornerRadius
         )
     }
 
@@ -902,7 +1084,7 @@ enum WindowAppearance {
     /// Install (if needed) and configure the liquid-glass background view so it
     /// fills the window behind SwiftUI's content, including the area under the
     /// titlebar. Installed once per window, then reconfigured in place.
-    private static func syncGlass(window: NSWindow, backgroundColor: NSColor, opacity: Double) {
+    private static func syncGlass(window: NSWindow, backgroundColor: NSColor, opacity: Double, cornerRadius: CGFloat?) {
         guard #available(macOS 26.0, *) else { return }
         guard let contentView = window.contentView, let themeFrame = contentView.superview else { return }
 
@@ -925,7 +1107,7 @@ enum WindowAppearance {
             style: officialGlassStyle(Preferences.shared.windowGlassStyle),
             backgroundColor: backgroundColor,
             backgroundOpacity: opacity,
-            cornerRadius: windowCornerRadius(window)
+            cornerRadius: cornerRadius
         )
     }
 

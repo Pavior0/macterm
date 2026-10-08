@@ -19,10 +19,10 @@ struct PreferencesTests {
 
         #expect(Preferences.shared.recentTabCandidates == Preferences.unlimitedRecentTabCandidates)
         Preferences.shared.recentTabCandidates = 8
-        #expect(Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates) as? Int == 8)
+        #expect(Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates.name) as? Int == 8)
         Preferences.shared.recentTabCandidates = Preferences.unlimitedRecentTabCandidates
         #expect(
-            Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates) as? Int
+            Preferences.defaults.object(forKey: Preferences.Keys.recentTabCandidates.name) as? Int
                 == Preferences.unlimitedRecentTabCandidates
         )
     }
@@ -34,7 +34,7 @@ struct PreferencesTests {
 
         #expect(Preferences.shared.showTabSwitcherOverlay)
         Preferences.shared.showTabSwitcherOverlay = false
-        #expect(!Preferences.defaults.bool(forKey: Preferences.Keys.showTabSwitcherOverlay))
+        #expect(!Preferences.defaults.bool(forKey: Preferences.Keys.showTabSwitcherOverlay.name))
     }
 
     @Test
@@ -43,10 +43,29 @@ struct PreferencesTests {
         defer { Preferences.shared.sidebarPeekStyle = prior }
 
         Preferences.shared.sidebarPeekStyle = .overlayTerminal
-        #expect(Preferences.defaults.string(forKey: Preferences.Keys.sidebarPeekStyle) == "overlay_on_hover")
+        #expect(Preferences.defaults.string(forKey: Preferences.Keys.sidebarPeekStyle.name) == "overlay_on_hover")
 
         Preferences.shared.sidebarPeekStyle = .resizeTerminal
-        #expect(Preferences.defaults.string(forKey: Preferences.Keys.sidebarPeekStyle) == "resize_content")
+        #expect(Preferences.defaults.string(forKey: Preferences.Keys.sidebarPeekStyle.name) == "resize_content")
+    }
+
+    @Test
+    func palettes_are_on_by_default_and_the_off_set_round_trips() {
+        let prior = Preferences.shared.disabledPaletteIDs
+        defer { Preferences.shared.disabledPaletteIDs = prior }
+
+        #expect(Preferences.shared.disabledPaletteIDs.isEmpty)
+        #expect(Preferences.shared.isPaletteEnabled("worktrees"))
+
+        Preferences.shared.setPalette("worktrees", enabled: false)
+        Preferences.shared.setPalette("worktrees", enabled: false)
+        #expect(Preferences.shared.disabledPaletteIDs == ["worktrees"], "turning off twice records it once")
+        #expect(!Preferences.shared.isPaletteEnabled("worktrees"))
+        #expect(Preferences.defaults.stringArray(forKey: Preferences.Keys.disabledPaletteIDs.name) == ["worktrees"])
+
+        Preferences.shared.setPalette("worktrees", enabled: true)
+        #expect(Preferences.shared.isPaletteEnabled("worktrees"))
+        #expect(Preferences.shared.disabledPaletteIDs.isEmpty)
     }
 
     @Test
@@ -58,7 +77,7 @@ struct PreferencesTests {
         #expect(Preferences.shared.reconnectRemotePanes)
 
         Preferences.shared.reconnectRemotePanes = false
-        #expect(Preferences.defaults.object(forKey: Preferences.Keys.reconnectRemotePanes) as? Bool == false)
+        #expect(Preferences.defaults.object(forKey: Preferences.Keys.reconnectRemotePanes.name) as? Bool == false)
     }
 
     @Test
@@ -70,7 +89,7 @@ struct PreferencesTests {
         #expect(Preferences.shared.showProjectNewTabButton)
 
         Preferences.shared.showProjectNewTabButton = false
-        #expect(Preferences.defaults.object(forKey: Preferences.Keys.showProjectNewTabButton) as? Bool == false)
+        #expect(Preferences.defaults.object(forKey: Preferences.Keys.showProjectNewTabButton.name) as? Bool == false)
     }
 
     @Test
@@ -92,7 +111,7 @@ struct PreferencesTests {
 
         Preferences.shared.activeProjectID = sentinel
 
-        let standardValue = UserDefaults.standard.string(forKey: Preferences.Keys.activeProjectID)
+        let standardValue = UserDefaults.standard.string(forKey: Preferences.Keys.activeProjectID.name)
         #expect(standardValue != sentinel.uuidString)
     }
 
@@ -120,7 +139,7 @@ struct PreferencesTests {
         state.selectProject(project)
 
         #expect(Preferences.shared.activeProjectID == project.id)
-        let standardValue = UserDefaults.standard.string(forKey: Preferences.Keys.activeProjectID)
+        let standardValue = UserDefaults.standard.string(forKey: Preferences.Keys.activeProjectID.name)
         #expect(standardValue != project.id.uuidString)
         let standardRecency = UserDefaults.standard.stringArray(forKey: "macterm.projectRecency") ?? []
         #expect(!standardRecency.contains(project.id.uuidString))

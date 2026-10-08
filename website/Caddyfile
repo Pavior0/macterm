@@ -1,5 +1,5 @@
 # Serves the built site (see website/README.md). Used verbatim by the image
-# built from website/Dockerfile and by `bun run dev`, so what you preview
+# built from website/Containerfile and by `bun run dev`, so what you preview
 # locally is what production runs.
 #
 # Two rules are why this file exists rather than a bare file server.
@@ -42,6 +42,11 @@
 		not path /notes/*
 	}
 	redir @html_ext {re.html_ext.1} 301
+
+	# Retired docs pages. Both were published and are linked from the wild, so
+	# they redirect to the docs index rather than 404ing.
+	redir /docs/ghostty /docs/ 301
+	redir /docs/tmux /docs/ 301
 
 	# Liveness for the container runtime, matched before any file lookup.
 	respond /healthz 200 {

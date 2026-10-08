@@ -103,10 +103,10 @@ struct MainWindow: View {
     private var sidebarWidth: CGFloat { sidebarWidthHandoff.width }
     private var peekStripWidth: CGFloat { SidebarOverlayMetrics.hoverActivationWidth }
     /// How far in from the leading edge the CONFIGURED style can acquire a
-    /// peek. The overlay's intent-aware corridor is far wider than the strip,
-    /// so `suppressPeekUntilExit` has to be armed and cleared against this —
-    /// against the strip, an explicit hide with the pointer at x=40 armed
-    /// nothing and the smallest leftward move popped the overlay back out.
+    /// peek. The overlay's intent-aware corridor is wider than the strip, so
+    /// `suppressPeekUntilExit` has to be armed and cleared against this —
+    /// against the strip, an explicit hide with the pointer in the corridor
+    /// armed nothing and the smallest leftward move popped the overlay back out.
     /// For the resize style the two are the same value.
     private var peekAcquisitionWidth: CGFloat {
         preferences.sidebarPeekStyle == .overlayTerminal
@@ -281,12 +281,11 @@ struct MainWindow: View {
             onWindowBecameKey: { window in
                 appState.noteKeyWindow(appState.canonicalWindowState(for: window, proposed: windowState))
             },
-            shouldHideOnClose: { appState.appDelegate?.hidesInsteadOfClosing($0) ?? true }
+            shouldHideOnClose: { appState.appDelegate?.hidesInsteadOfClosing($0) ?? true },
+            onWindowFrameChanged: { appState.windowFrameDidChange($0) }
         ))
         .overlay {
-            if windowState.isCommandPaletteVisible {
-                CommandPaletteOverlay()
-            }
+            CommandPaletteMount(isVisible: windowState.isCommandPaletteVisible)
         }
         // Below the palette (the two can't be up together — cycling commits on
         // modifier release), above the terminal it describes.
@@ -307,13 +306,16 @@ struct MainWindow: View {
         .sheet(isPresented: $windowState.isNewRemoteProjectSheetPresented) {
             NewRemoteProjectSheet()
         }
+        .sheet(
+            item: $windowState.passwordEditor,
+            onDismiss: { appState.restoreFocusToActivePane() },
+            content: { PasswordEditorSheet(request: $0, vault: .shared) }
+        )
         .environment(windowState)
         // Applied here rather than in the scene so each copy knows WHICH
         // window it is: they stay grouped in these three modifiers, which is
         // the rule — the alerts must not scatter back into `body`.
-        .modifier(CloseConfirmationAlerts(appState: appState, windowID: windowState.id))
-        .modifier(ProjectConfirmationAlerts(appState: appState, windowID: windowState.id))
-        .modifier(LayoutAlerts(appState: appState, windowID: windowState.id))
+        .modifier(PendingDialogAlert(appState: appState, host: .mainWindow, windowID: windowState.id))
         .onAppear {
             AdaptiveTerminalChrome.shared.mainWindowDidAppear()
         }
@@ -462,6 +464,12 @@ struct MainWindow: View {
         }
         .onChange(of: windowState.isCommandPaletteVisible) { _, visible in
             guard !visible else { return }
+            // Every close lands back on the root next time, however it closed
+            // (⌘P included); a scope's search text goes with it.
+            if windowState.paletteScope != nil {
+                windowState.resetPaletteStack()
+                appState.commandPaletteQuery = ""
+            }
             // Run a post-dismiss action if one was registered, otherwise return
             // focus to the active terminal pane so typing resumes immediately.
             if let action = appState.postPaletteAction {
@@ -1186,6 +1194,7 @@ struct WorkspaceView: View {
             zoomedPaneID: zoomedPaneID,
             isActiveProject: true,
             projectID: project.id,
+            resizeGeneration: tab.animatedResizeGeneration,
             nonLeaderPaneIDs: appState.nonLeaderPaneIDs(in: tab),
             onFocusPane: { paneID in focus(paneID, in: view) },
             onSplit: { paneID, dir, position in split(paneID, direction: dir, position: position, in: view) },
@@ -1358,6 +1367,9 @@ private struct WindowStyler: NSViewRepresentable {
     /// Whether the red close button should hide the window rather than close
     /// it — the app's one close policy (`AppDelegate.hidesInsteadOfClosing`).
     var shouldHideOnClose: (NSWindow) -> Bool = { _ in true }
+    /// The window moved or resized — what `AppState` records as the frame the
+    /// next launch reopens it at (#496).
+    var onWindowFrameChanged: (NSWindow) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1397,6 +1409,9 @@ private struct WindowStyler: NSViewRepresentable {
             // visible boundary, which is jarring when both are translucent.
             window.styleMask.insert(.fullSizeContentView)
             window.titleVisibility = hideTitle ? .hidden : .visible
+            // Before `onWindowAttached`, which restores the saved frame: from
+            // here on the frame is ours to persist, not SwiftUI's autosave.
+            WindowAppearance.disownFrameAutosave(window: window)
             WindowAppearance.sync(window: window)
             coordinator.syncWindowCornerRadius(window: window)
             coordinator.syncWindowTopSafeAreaInset(window: window)
@@ -1404,7 +1419,11 @@ private struct WindowStyler: NSViewRepresentable {
             coordinator.observe(window: window)
             coordinator.onWindowBecameKey = onWindowBecameKey
             coordinator.shouldHideOnClose = shouldHideOnClose
+            coordinator.onWindowFrameChanged = onWindowFrameChanged
             onWindowAttached(window)
+            // Record the frame it attached at (or was just restored to), so a
+            // window that is never moved still reopens where it was.
+            onWindowFrameChanged(window)
             // A window that opens already key never posts didBecomeKey, so
             // seed the app's notion of the frontmost project from it.
             if window.isKeyWindow { onWindowBecameKey(window) }
@@ -1496,6 +1515,17 @@ private struct WindowStyler: NSViewRepresentable {
 
         var onWindowBecameKey: (NSWindow) -> Void = { _ in }
         var shouldHideOnClose: (NSWindow) -> Bool = { _ in true }
+        var onWindowFrameChanged: (NSWindow) -> Void = { _ in }
+
+        func windowDidResize(_ notification: Notification) {
+            if let window = notification.object as? NSWindow { onWindowFrameChanged(window) }
+            swiftuiDelegate?.windowDidResize?(notification)
+        }
+
+        func windowDidMove(_ notification: Notification) {
+            if let window = notification.object as? NSWindow { onWindowFrameChanged(window) }
+            swiftuiDelegate?.windowDidMove?(notification)
+        }
 
         func windowDidBecomeKey(_ notification: Notification) {
             if let window = notification.object as? NSWindow { onWindowBecameKey(window) }

@@ -5,13 +5,13 @@ struct HorizontalTabIcon: View {
     let tab: TerminalTab
     let index: Int
     @AppStorage(Preferences.Keys.tabIconSymbol)
-    private var tabIconSymbol = "terminal"
+    private var tabIconSymbol: String
     @AppStorage(Preferences.Keys.showAgentIcons)
-    private var showAgentIcons = true
+    private var showAgentIcons: Bool
     @AppStorage(Preferences.Keys.showTabStatusIndicator)
-    private var showTabStatusIndicator = false
+    private var showTabStatusIndicator: Bool
     @AppStorage(Preferences.Keys.showSpinnerOverAgentIcons)
-    private var showSpinnerOverAgentIcons = true
+    private var showSpinnerOverAgentIcons: Bool
 
     private var agentIcon: AgentIcon? { showAgentIcons ? tab.agentIcon : nil }
 

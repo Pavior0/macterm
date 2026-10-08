@@ -520,6 +520,61 @@ struct WindowStateTests {
     }
 
     @Test
+    func every_window_reopens_at_its_own_saved_frame() {
+        // #496: the frame was left to SwiftUI's autosave, whose key changes
+        // every launch, so windows always came back at the default size. It
+        // is the window's own snapshot entry now — the first window adopts
+        // entry 0's frame, and each restored window its own.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-window-tests-\(UUID().uuidString).json")
+        let projects = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-window-tests-projects-\(UUID().uuidString)", isDirectory: true)
+        let files = ProjectFileStore(directoryURL: projects)
+        let p = Project(name: "p", path: "/tmp", sortOrder: 0)
+        let firstFrame = "100 200 1400 900 0 0 3008 1662 "
+        let secondFrame = "1508 9 1492 1645 0 0 3008 1662 "
+
+        let writer = AppState(workspaceStore: WorkspaceStore(fileURL: tmp), projectFiles: files)
+        writer.restoreSelection(projects: [p])
+        writer.selectProject(p)
+        let w1 = WindowState(activeProjectID: p.id)
+        let w2 = WindowState(activeProjectID: p.id)
+        w1.frame = firstFrame
+        w2.frame = secondFrame
+        writer.registerWindow(w1)
+        writer.registerWindow(w2)
+        writer.saveWorkspaces()
+
+        let reader = AppState(workspaceStore: WorkspaceStore(fileURL: tmp), projectFiles: files)
+        reader.restoreSelection(projects: [p])
+        let first = WindowState()
+        reader.registerWindow(first)
+        reader.noteKeyWindow(first)
+        reader.restoreWindows(adopting: first)
+        let second = WindowState()
+        reader.registerWindow(second)
+
+        #expect(first.frame == firstFrame)
+        #expect(second.frame == secondFrame)
+
+        // A window the user opens afterwards has no saved frame to adopt; it
+        // opens wherever the scene puts it.
+        let opened = WindowState()
+        reader.registerWindow(opened)
+        #expect(opened.frame == nil)
+    }
+
+    @Test
+    func a_snapshot_saved_before_frames_were_persisted_still_restores() throws {
+        // `frame` is optional, so a v6 file written by an older build decodes
+        // and its windows open at the default size.
+        let json = #"{"activeProjectID":null,"sidebarWidth":200,"isKey":true}"#
+        let snapshot = try JSONDecoder().decode(WindowSnapshot.self, from: Data(json.utf8))
+        #expect(snapshot.frame == nil)
+        #expect(snapshot.sidebarWidth == 200)
+    }
+
+    @Test
     func a_window_the_user_opens_comes_up_at_the_default_sidebar_state() {
         // Not at whatever was last dragged in some other (possibly since
         // closed) window, and never collapsed.
@@ -840,5 +895,103 @@ struct WindowStateTests {
 
         let created = pinned.createTab(projectPath: "/tmp")
         #expect(reader.selectedTab(for: PinnedTabs.projectID, in: restored)?.id == created.id)
+    }
+}
+
+/// The palette's screens (`PaletteScope`) on the window the user is in.
+@MainActor
+struct PaletteScopeWindowTests {
+    private func makeAppState() -> AppState {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-window-tests-\(UUID().uuidString).json")
+        let projects = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macterm-window-tests-projects-\(UUID().uuidString)", isDirectory: true)
+        return AppState(
+            workspaceStore: WorkspaceStore(fileURL: tmp),
+            projectFiles: ProjectFileStore(directoryURL: projects)
+        )
+    }
+
+    @Test
+    func a_screens_chord_opens_it_switches_to_it_and_closes_it() {
+        let state = makeAppState()
+        let window = WindowState()
+        state.registerWindow(window)
+        state.noteKeyWindow(window)
+
+        state.toggleCommandPalette(scope: .passwords)
+        #expect(window.isCommandPaletteVisible)
+        #expect(window.paletteScope == .passwords)
+
+        state.toggleCommandPalette(scope: .passwords)
+        #expect(!window.isCommandPaletteVisible, "pressed again on its own screen, it closes")
+
+        // Up on the root with a search typed: the chord switches screens and
+        // starts that screen's search empty.
+        state.commandPaletteQuery = "split"
+        state.openCommandPalette(scope: nil)
+        state.toggleCommandPalette(scope: .passwords)
+        #expect(window.isCommandPaletteVisible)
+        #expect(window.paletteScope == .passwords)
+        #expect(state.commandPaletteQuery.isEmpty)
+    }
+
+    @Test
+    func screens_stack_and_pop_back_through_their_frames() {
+        let window = WindowState()
+        #expect(window.paletteScope == nil)
+
+        window.pushPaletteFrame(PaletteFrame(.passwords))
+        window.pushPaletteFrame(PaletteFrame(.worktrees))
+        window.pushPaletteFrame(PaletteFrame(.worktrees, pill: PalettePill(title: "feature", systemImage: "tag")))
+        #expect(window.paletteStack.map(\.scopeID) == [.passwords, .worktrees, .worktrees])
+        #expect(
+            window.paletteStack.map(\.pill.title) == ["Password Manager", "Worktrees", "feature"],
+            "a frame is named by its own pill unless the row that opened it says otherwise"
+        )
+        #expect(window.paletteScope == .worktrees)
+        #expect(window.paletteStack[1] != window.paletteStack[2], "two frames of one scope are two frames")
+
+        window.popPaletteFrame()
+        #expect(window.paletteStack.count == 2)
+
+        window.popPaletteFrames(above: 2)
+        #expect(window.paletteStack.count == 2, "an index past the top pops nothing")
+        window.popPaletteFrames(above: 0)
+        #expect(window.paletteStack.map(\.scopeID) == [.passwords], "a pill click keeps its own frame")
+
+        window.popPaletteFrame()
+        window.popPaletteFrame()
+        #expect(window.paletteStack.isEmpty, "popping the root is nothing")
+    }
+
+    @Test
+    func a_screens_chord_replaces_a_nested_stack_with_that_screen_alone() {
+        let state = makeAppState()
+        let window = WindowState()
+        state.registerWindow(window)
+        state.noteKeyWindow(window)
+
+        window.pushPaletteFrame(PaletteFrame(.worktrees))
+        window.pushPaletteFrame(PaletteFrame(.passwords))
+        state.commandPaletteQuery = "prod"
+        state.openCommandPalette(scope: .passwords)
+        #expect(window.paletteStack.map(\.scopeID) == [.passwords], "the screen asked for, from the root")
+        #expect(state.commandPaletteQuery.isEmpty, "a different stack is a different search")
+
+        // Already alone on that screen: the chord leaves the search typed.
+        state.commandPaletteQuery = "prod"
+        state.openCommandPalette(scope: .passwords)
+        #expect(state.commandPaletteQuery == "prod")
+
+        window.resetPaletteStack()
+        #expect(window.paletteStack.isEmpty)
+    }
+
+    @Test
+    func password_manager_is_a_bindable_command_that_is_a_palette_screen() {
+        #expect(AppCommand.passwordManager.hotkeyAction == .passwordManager)
+        #expect(HotkeyAction.passwordManager.appCommand == .passwordManager)
+        #expect(HotkeyAction.passwordManager.defaultShortcut == "none")
     }
 }

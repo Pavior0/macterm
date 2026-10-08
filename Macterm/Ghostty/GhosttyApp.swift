@@ -10,6 +10,17 @@ private let logger = Logger(subsystem: appBundleID, category: "GhosttyApp")
 final class GhosttyApp {
     static let shared = GhosttyApp()
 
+    /// libghostty's version string (`1.3.2-main+b368389`), the value it sets
+    /// as `TERM_PROGRAM_VERSION` in a local pane. A build constant, so
+    /// `ghostty_info` needs no `ghostty_init` first, and no actor either, so
+    /// `RemoteSpawn`'s constants can read it. nil if it comes back empty.
+    nonisolated static let version: String? = {
+        let info = ghostty_info()
+        guard let pointer = info.version, info.version_len > 0 else { return nil }
+        let bytes = UnsafeRawBufferPointer(start: pointer, count: Int(info.version_len))
+        return String(decoding: bytes, as: UTF8.self)
+    }()
+
     @ObservationIgnored
     private(set) var app: ghostty_app_t?
     private(set) var config: ghostty_config_t?
@@ -262,8 +273,8 @@ final class GhosttyApp {
     /// counts; the decision itself is `GhosttyAppIcon`, the write is
     /// `AppIconPresenter`.
     private func applyAppIcon() {
-        let style = configCString(GhosttyAppIcon.styleKey)
-        let customPath = configCString(GhosttyAppIcon.customPathKey)
+        let style = read(GhosttyAppIcon.styleKey)
+        let customPath = read(GhosttyAppIcon.customPathKey)
         let icon = GhosttyAppIcon.resolve(style: style, customPath: customPath)
         if GhosttyAppIcon.isGhosttyArtwork(style: style) {
             logger.info(
@@ -349,7 +360,7 @@ final class GhosttyApp {
     var backgroundColor: NSColor {
         if let rgb = resolvedColors?.background { return nsColor(rgb) }
         if let hex = resolvedThemeColors()?.background, let c = nsColor(fromHex: hex) { return c }
-        return configColor("background") ?? NSColor(srgbRed: 0.11, green: 0.11, blue: 0.14, alpha: 1)
+        return read(Keys.background) ?? NSColor(srgbRed: 0.11, green: 0.11, blue: 0.14, alpha: 1)
     }
 
     /// The color space the renderer paints in (the user's
@@ -358,6 +369,16 @@ final class GhosttyApp {
     var surfaceColorSpace: NSColorSpace {
         GhosttyColorSpace.resolve(userConfigText: MactermConfig.userGhosttyConfigText())
     }
+
+    /// The user's `mouse-scroll-multiplier`. Only the scroller-drag path
+    /// reads it, to speak the core's own scroll units back to it — a wheel
+    /// event is forwarded untouched and multiplied inside ghostty (#393).
+    /// See `MouseScrollMultiplier`.
+    ///
+    /// Cached rather than resolved on demand like `surfaceColorSpace`:
+    /// resolving reads the user's config off disk, and this one is read on
+    /// the scroll path, once per event.
+    private(set) var mouseScrollMultiplier: MouseScrollMultiplier = .default
 
     var effectiveBackgroundColor: NSColor {
         adaptiveBackgroundColor ?? backgroundColor
@@ -374,7 +395,7 @@ final class GhosttyApp {
     var foregroundColor: NSColor {
         if let rgb = resolvedColors?.foreground { return nsColor(rgb) }
         if let hex = resolvedThemeColors()?.foreground, let c = nsColor(fromHex: hex) { return c }
-        return configColor("foreground") ?? .white
+        return read(Keys.foreground) ?? .white
     }
 
     var accentColor: NSColor { paletteColor(at: 4) ?? foregroundColor }
@@ -383,14 +404,7 @@ final class GhosttyApp {
         guard (0 ..< 256).contains(index) else { return nil }
         if let rgb = resolvedColors?.palette[index] { return nsColor(rgb) }
         if let hex = resolvedThemeColors()?.palette[index], let c = nsColor(fromHex: hex) { return c }
-        guard let config else { return nil }
-        var palette = ghostty_config_palette_s()
-        let key = "palette"
-        guard ghostty_config_get(config, &palette, key, UInt(key.utf8.count)) else { return nil }
-        let c = withUnsafePointer(to: &palette.colors) {
-            $0.withMemoryRebound(to: ghostty_config_color_s.self, capacity: 256) { $0[index] }
-        }
-        return NSColor(srgbRed: CGFloat(c.r) / 255, green: CGFloat(c.g) / 255, blue: CGFloat(c.b) / 255, alpha: 1)
+        return read(Keys.palette)?[index]
     }
 
     /// The alpha of the overlay that dims an unfocused split pane, derived
@@ -399,10 +413,7 @@ final class GhosttyApp {
     /// 0.15…1 at load), so the overlay draws at its complement — the same
     /// reading Ghostty.app applies.
     var unfocusedSplitDimOpacity: Double {
-        guard let config else { return 0 }
-        var opacity = 1.0
-        let key = "unfocused-split-opacity"
-        guard ghostty_config_get(config, &opacity, key, UInt(key.utf8.count)) else { return 0 }
+        guard let opacity = read(Keys.unfocusedSplitOpacity) else { return 0 }
         return 1 - opacity
     }
 
@@ -411,56 +422,36 @@ final class GhosttyApp {
     /// reads as the pane fading toward the background — correct on light and
     /// dark themes alike.
     var unfocusedSplitFill: NSColor {
-        configColor("unfocused-split-fill") ?? backgroundColor
+        read(Keys.unfocusedSplitFill) ?? backgroundColor
     }
 
-    private func configColor(_ key: String) -> NSColor? {
+    // MARK: - Config keys
+
+    /// The one reader for a key off the loaded config. Which C shape the key
+    /// needs is the key's own business (`GhosttyConfigKey`); nil when no
+    /// config has loaded, the getter fails or the value is unset.
+    private func read<T>(_ key: GhosttyConfigKey<T>) -> T? {
         guard let config else { return nil }
-        var color = ghostty_config_color_s()
-        guard ghostty_config_get(config, &color, key, UInt(key.utf8.count)) else { return nil }
-        return NSColor(srgbRed: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 1)
+        return key.read(from: config)
     }
 
-    /// An explicit shell command from the user's ghostty config (`command =`),
-    /// used as the fallback when a layout pane doesn't name its own `shell`.
-    /// Returns nil when the config doesn't set one — and that nil is important:
-    /// the caller then leaves `config.command` unset so libghostty resolves the
-    /// user's *login* shell itself (via the password database). We deliberately
-    /// do NOT fall back to `$SHELL`: that's the shell of whatever process
-    /// launched the app (often `/bin/zsh` from the launchd/login chain), not the
-    /// user's login shell, so using it forced every pane onto `zsh` regardless
-    /// of the user's real shell.
-    var configuredShell: String? {
-        guard let command = configString("command"), !command.isEmpty else { return nil }
-        return command
-    }
-
-    private func configString(_ key: String) -> String? {
-        guard let config else { return nil }
-        var str = ghostty_string_s()
-        guard ghostty_config_get(config, &str, key, UInt(key.utf8.count)), let ptr = str.ptr else { return nil }
-        return String(bytes: UnsafeRawBufferPointer(start: ptr, count: Int(str.len)), encoding: .utf8)
-    }
-
-    /// A key libghostty's C getter hands back as a bare C string: enums (their
-    /// tag name, e.g. `macos-icon`) and optional `[:0]const u8` values (e.g.
-    /// `macos-custom-icon`), per `src/config/c_get.zig`. Distinct from
-    /// `configString`, whose keys arrive as a `ghostty_string_s`. An unset
-    /// `?[:0]const u8` is the case to watch: the getter writes a null pointer
-    /// and still returns *true*, so the pointer — not the return value — is
-    /// what says the key is unset.
-    private func configCString(_ key: String) -> String? {
-        guard let config else { return nil }
-        var ptr: UnsafePointer<CChar>?
-        guard ghostty_config_get(config, &ptr, key, UInt(key.utf8.count)), let ptr else { return nil }
-        return String(cString: ptr)
-    }
-
-    private func configBool(_ key: String, default defaultValue: Bool) -> Bool {
-        guard let config else { return defaultValue }
-        var value = defaultValue
-        guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return defaultValue }
-        return value
+    /// Keys read only here. Keys a Macterm type interprets live on that
+    /// type (`MacosHidden.key`, `ShortcutsAccess.key`, `GhosttyAppIcon`).
+    private enum Keys {
+        static let background = GhosttyConfigKey.color("background")
+        static let foreground = GhosttyConfigKey.color("foreground")
+        static let palette = GhosttyConfigKey.palette("palette")
+        static let unfocusedSplitOpacity = GhosttyConfigKey.double("unfocused-split-opacity")
+        static let unfocusedSplitFill = GhosttyConfigKey.color("unfocused-split-fill")
+        static let bellFeatures = GhosttyConfigKey.packed("bell-features")
+        static let bellAudioPath = GhosttyConfigKey.path("bell-audio-path")
+        static let bellAudioVolume = GhosttyConfigKey.double("bell-audio-volume")
+        static let autoSecureInput = GhosttyConfigKey.bool("macos-auto-secure-input")
+        static let secureInputIndication = GhosttyConfigKey.bool("macos-secure-input-indication")
+        static let backgroundOpacityCells = GhosttyConfigKey.bool("background-opacity-cells")
+        static let tabInheritWorkingDirectory = GhosttyConfigKey.bool("tab-inherit-working-directory")
+        static let splitInheritWorkingDirectory = GhosttyConfigKey.bool("split-inherit-working-directory")
+        static let focusFollowsMouse = GhosttyConfigKey.bool("focus-follows-mouse")
     }
 
     // MARK: - Bell & secure input config (read by GhosttyCallbacks)
@@ -479,47 +470,42 @@ final class GhosttyApp {
     }
 
     var bellFeatures: BellFeatures {
-        guard let config else { return [] }
-        var raw: CUnsignedInt = 0
-        let key = "bell-features"
-        guard ghostty_config_get(config, &raw, key, UInt(key.utf8.count)) else { return [] }
-        return BellFeatures(rawValue: raw)
+        BellFeatures(rawValue: read(Keys.bellFeatures) ?? 0)
     }
 
     /// Absolute path of the user's `bell-audio-path`, or nil when unset.
     var bellAudioPath: String? {
-        guard let config else { return nil }
-        var value = ghostty_config_path_s()
-        let key = "bell-audio-path"
-        guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)), let ptr = value.path else { return nil }
-        let path = String(cString: ptr)
-        return path.isEmpty ? nil : path
+        read(Keys.bellAudioPath)
     }
 
     var bellAudioVolume: Float {
-        guard let config else { return 0.5 }
-        var value = 0.5
-        let key = "bell-audio-volume"
-        _ = ghostty_config_get(config, &value, key, UInt(key.utf8.count))
-        return Float(value)
+        Float(read(Keys.bellAudioVolume) ?? 0.5)
     }
 
     /// `macos-auto-secure-input`: gate for enabling secure keyboard input
     /// automatically while a surface reports a password prompt.
     var autoSecureInput: Bool {
-        configBool("macos-auto-secure-input", default: true)
+        read(Keys.autoSecureInput) ?? true
     }
 
     /// `macos-secure-input-indication`: whether to show the per-pane lock
     /// badge while secure input is active.
     var secureInputIndication: Bool {
-        configBool("macos-secure-input-indication", default: true)
+        read(Keys.secureInputIndication) ?? true
+    }
+
+    /// `background-opacity-cells`: whether the renderer paints explicitly
+    /// colored cell backgrounds at `background-opacity` rather than opaque.
+    /// Read by the adaptive chrome, which has to know the alpha a TUI's paint
+    /// arrives at — a reported OSC 11 color says nothing about it.
+    var backgroundOpacityCells: Bool {
+        read(Keys.backgroundOpacityCells) ?? false
     }
 
     /// `macos-hidden`: whether the app runs as an accessory (no Dock tile, no
     /// menu bar, no ⌘-Tab entry). Applied by `AppDelegate.applyActivationPolicy`.
     var macosHidden: MacosHidden {
-        MacosHidden.resolve(configValue: configEnum(MacosHidden.key))
+        MacosHidden.resolve(configValue: read(MacosHidden.key))
     }
 
     /// `macos-shortcuts`: whether Shortcuts, Spotlight and the `shortcuts` CLI
@@ -527,7 +513,7 @@ final class GhosttyApp {
     /// `IntentPermissionGate` on every authorize, so a config reload takes
     /// effect on the next intent.
     var shortcutsAccess: ShortcutsAccess {
-        ShortcutsAccess.resolve(configValue: configEnum(ShortcutsAccess.key))
+        ShortcutsAccess.resolve(configValue: read(ShortcutsAccess.key))
     }
 
     /// `tab-inherit-working-directory`: a new tab starts in the focused pane's
@@ -536,28 +522,20 @@ final class GhosttyApp {
     /// `macterm-defaults.conf` pins it to false, which is also the fallback
     /// here for the moment before any config has loaded.
     var tabInheritsWorkingDirectory: Bool {
-        configBool("tab-inherit-working-directory", default: false)
+        read(Keys.tabInheritWorkingDirectory) ?? false
     }
 
     /// `split-inherit-working-directory`: the same choice for a new split.
     /// Ghostty's default (true) is Macterm's too, so nothing pins it.
     var splitInheritsWorkingDirectory: Bool {
-        configBool("split-inherit-working-directory", default: true)
+        read(Keys.splitInheritWorkingDirectory) ?? true
     }
 
-    /// Read an enum-valued key as its ghostty tag name.
-    ///
-    /// Deliberately NOT `configString`: libghostty writes an enum's `@tagName`
-    /// as a bare NUL-terminated pointer, while `configString` hands it a
-    /// `ghostty_string_s` whose `len` then stays 0 — which is why the same call
-    /// reads *empty* for `window-colorspace` (see `GhosttyColorSpace`, which
-    /// went to the raw config text instead). Ghostty.app's own Swift reads
-    /// `macos-hidden` exactly this way.
-    private func configEnum(_ key: String) -> String? {
-        guard let config else { return nil }
-        var value: UnsafePointer<CChar>?
-        guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)), let value else { return nil }
-        return String(cString: value)
+    /// `focus-follows-mouse`: moving the pointer over a pane of the key window
+    /// focuses it, as clicking it would. Read live by the terminal view on
+    /// each pointer move, so a config reload takes effect at once.
+    var focusFollowsMouse: Bool {
+        read(Keys.focusFollowsMouse) ?? false
     }
 
     private func loadConfig() -> (ghostty_config_t?, ReloadResult) {
@@ -613,6 +591,12 @@ final class GhosttyApp {
                 result.diagnostics.append(s)
             }
         }
+
+        // Raw-text values the C API can't answer, re-read with the config
+        // they belong to.
+        mouseScrollMultiplier = MouseScrollMultiplier.resolve(
+            userConfigText: MactermConfig.userGhosttyConfigText()
+        )
 
         return (cfg, result)
     }

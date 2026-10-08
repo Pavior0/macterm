@@ -72,10 +72,68 @@ final class WindowState: Identifiable {
     /// of the key window's copy for the app-wide code paths (hotkeys, palette
     /// commands, the CLI) that mean "the window the user is in".
     var sidebarVisible = true
+
+    /// This window's frame, as AppKit's `frameDescriptor` — what the next
+    /// launch reopens it at (`WindowSnapshot.frame`). Written on every move
+    /// and resize outside full screen, so it holds the windowed frame while
+    /// the window is full screen. Unobserved: nothing renders from it, and a
+    /// live resize would otherwise invalidate the window's views per event.
+    @ObservationIgnored
+    var frame: String?
+
     var isCommandPaletteVisible = false
     /// Whether this window's horizontal-tab project switcher is open.
     var isHorizontalProjectSwitcherPresented = false
+
+    /// The palette screens showing (`PaletteScope`), root first; empty is
+    /// the root itself. Every push and pop goes through the methods below,
+    /// which own a frame's end of life (`PaletteScope.deactivate`); the
+    /// panel owns its start, since activation needs the palette's context.
+    /// Emptied whenever the palette closes.
+    private(set) var paletteStack: [PaletteFrame] = []
+
+    /// The screen on top, nil on the root.
+    var paletteScope: PaletteScopeID? { paletteStack.last?.scopeID }
+
+    /// Opens `frame` over whatever is showing.
+    func pushPaletteFrame(_ frame: PaletteFrame) {
+        paletteStack.append(frame)
+    }
+
+    /// Back one screen; nothing on the root.
+    func popPaletteFrame() {
+        guard let frame = paletteStack.popLast() else { return }
+        frame.scope.deactivate()
+    }
+
+    /// Back to the frame at `index`, which stays — a click on its pill.
+    func popPaletteFrames(above index: Int) {
+        guard index >= 0, index < paletteStack.count - 1 else { return }
+        let popped = paletteStack[(index + 1)...]
+        paletteStack.removeSubrange((index + 1)...)
+        popped.forEach { $0.scope.deactivate() }
+    }
+
+    /// Shows `scope` alone — a screen's own chord, from wherever the
+    /// palette was — or the root for nil.
+    func showPaletteScope(_ scope: PaletteScopeID?) {
+        resetPaletteStack()
+        if let scope {
+            paletteStack = [PaletteFrame(scope)]
+        }
+    }
+
+    /// Back to the root.
+    func resetPaletteStack() {
+        let popped = paletteStack
+        paletteStack = []
+        popped.forEach { $0.scope.deactivate() }
+    }
+
     var isNewRemoteProjectSheetPresented = false
+    /// The password editor sheet up in this window — the palette's Password
+    /// Manager adding an entry.
+    var passwordEditor: PasswordEditorRequest?
 
     init(activeProjectID: UUID? = nil, sidebarWidth: Double? = nil) {
         self.activeProjectID = activeProjectID

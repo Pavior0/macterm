@@ -1,0 +1,97 @@
+<!-- page:
+slug: desktop-widgets
+title: Desktop widgets
+nav: Desktop widgets
+group: Everyday use
+description: Terminals that live on the desktop, on the system widgets' grid and shaped like them, whose shells survive a quit.
+-->
+
+# Desktop widgets
+
+A desktop widget is a terminal on your desktop. It sits with the system's own widgets, below every window, and stays put through Mission Control and Show Desktop. It appears on every Space.
+
+Add one with **File → New Desktop Widget**, **New Desktop Widget** in the command palette, or the **+** in **Settings → Widgets**. It opens in the middle of the desktop, 3×3 grid cells, running your login shell.
+
+Its shell persists like a pinned tab's. Quit Macterm with something running in a widget and it keeps running. On the next launch the widget comes back in the same place, attached to the same shell.
+
+## Locked and editing
+
+Widgets are **locked**. A locked widget behaves like a system widget: drag it anywhere to move it, but nothing you click, type or scroll reaches its terminal, text selection included. It just shows what its terminal is doing.
+
+To use one, right-click it and choose **Edit Widget**. While you edit it:
+
+- it has an accent-colored outline and a **Done** button, so you can always tell which widget is live;
+- its terminal takes keyboard and mouse input like any other pane, so a drag inside it selects text;
+- drag it by its border (the margin around the terminal) to move it;
+- drag an edge or corner to resize it.
+
+Click **Done**, or right-click the border → **Done Editing**, to lock it again. Only one widget can be edited at a time: **Edit Widget** stays greyed out on the others until you're done.
+
+Typing into a widget leaves the app you were in at the front.
+
+## The grid
+
+Widgets snap to a grid when you let go of a move or a resize. The grid is the system widgets' own: 164-point cells with 16-point gaps. A widget can span any number of cells; to change its size, edit it and drag an edge or corner. A new widget opens in the exact middle of the screen and joins the grid the first time you move or resize it. If the middle is taken, it opens in the nearest free cell instead.
+
+Like macOS, Macterm lines widgets up in groups. A widget you let go of next to another widget, including one of the system's, snaps into line with it. One let go in open space snaps to the screen's grid, which starts where macOS puts widgets against the top-left corner. Widgets never overlap, and never cover the system's widgets: one dropped onto another moves to the nearest free cell.
+
+## Changing displays
+
+Widgets follow your displays the way the system's widgets do. Each widget remembers where you put it on each display, at each resolution. Unplug an external display and its widgets move to the display that's left, at the same distance from its top-left corner (pulled back onto the screen if they'd land off it). Plug it back in and they return to exactly where you left them.
+
+Moving a widget on the smaller display gives it a spot there too, without losing its spot on the other one. A widget moved onto the screen by a display change isn't moved for good: nothing is saved until you move it yourself.
+
+## Settings → Widgets
+
+The **Widgets** list shows every widget, including ones hidden behind windows or on another display, with its size and a **Remove** for each; the one you're editing has an accent-colored icon. **+** adds a widget.
+
+Removing a widget ends its shell. If a program is still running in it, Macterm asks first.
+
+If a widget's shell exits (`exit`, or its session is killed), the widget starts over with a fresh shell instead of disappearing.
+
+## widgets.yaml
+
+The widgets live in `~/.config/macterm/widgets.yaml`, next to `pinned.yaml`. Macterm maintains the file automatically, and it's still yours to edit.
+
+```yaml
+widgets:
+  - name: logs              # optional; shown in Settings
+    size: 3x2               # the grid span, COLUMNSxROWS
+    column: 3               # the grid cell of the top-left corner,
+    row: 1                  #   counted from the top-left of the screen
+    display: DELL U2723QE   # the screen by name; Macterm always writes it
+    cwd: ~/dev/api          # where a fresh shell starts
+    run: tail -f log/dev.log
+```
+
+`cwd` and `run` are the widget's recipe for starting fresh: when it's created, when its shell exits, and after a reboot, when there's no session left to reattach. Macterm records them from what the widget is actually running, the same way a [pinned tab](/docs/pinned-tabs) records its commands.
+
+| Edit | Effect |
+| --- | --- |
+| Add an entry | Becomes a widget running its `run:`. |
+| Remove an entry | Its widget is removed on the next launch. |
+| Change `size`, `column`, `row` or `display` | The widget moves and resizes on the next launch, or the next time Macterm writes the file. A display that isn't connected keeps the cell for when it is. |
+| Change `run:` or `cwd:` | Applies the next time the widget starts fresh. |
+
+Entries carry no ids. Macterm matches them to widgets by `name:`, then by content, then by position, so name an entry before editing it heavily. Macterm re-reads the file before every write, so your edits are never clobbered. If the file stops parsing, auto-saving pauses with an alert until it parses again.
+
+## From the CLI
+
+```sh
+macterm widget new --size 4x3 --name top --run htop
+macterm widget list
+macterm widget edit widget:1
+macterm widget done
+macterm widget set widget:1 --size 3x2
+macterm widget remove widget:1
+```
+
+A widget's pane has no project or tab. Address it by the session name `widget list` shows. The CLI can type into a locked widget; the lock only covers the mouse and keyboard.
+
+```sh
+macterm pane dump --session macterm-widget-3f9a2c1d4b7e
+```
+
+## Why not a real macOS widget
+
+macOS widgets (WidgetKit) are static snapshots that the system redraws a few times an hour. They can't show a live terminal or accept typing. They also only load from apps signed with an Apple Developer team, which Macterm isn't. So Macterm draws the widget itself, and it doesn't appear in the desktop's **Edit Widgets** gallery.
