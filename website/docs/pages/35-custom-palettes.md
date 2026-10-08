@@ -167,7 +167,7 @@ It prints each file's id, whether it is on, its keybind, and its name or the err
 
 - **Settings → Palettes** lists every palette, built-in and custom, each with a switch. A palette turned off leaves the command palette, and its keybind says so instead of reaching the terminal. The **Palettes folder** row opens `~/.config/macterm/palettes/` in Finder.
 - **Settings → Keymaps** has a **Palettes** group first, with <kbd>⌘P</kbd> and a row for every palette. None has a keybind by default. A palette's keybind opens the command palette straight on it. Pressed again on the palette's first screen, it closes the palette. Pressed deeper in, it goes back to that first screen.
-- **Custom palettes' keybinds work inside Macterm only.** The built-in palettes can also be made **Global**, working from any app, or **Pass to TUI**, yielding to the programs you list.
+- **Any palette's keybind, built-in or custom, can be Global or Pass to TUI**, the two checkboxes on its row. A **Global** keybind works from any app: it brings Macterm's window forward with the palette open on it. **Pass to TUI** hands the keybind to the program in the focused pane when that program is one you list under Passthrough Programs.
 
 ## More examples
 

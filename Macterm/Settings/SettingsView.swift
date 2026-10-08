@@ -10,12 +10,20 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case projects = "Projects"
     case appearance = "Appearance"
     case animations = "Animations"
+    case keymaps = "Keymaps"
     case quickTerminal = "Quick Terminal"
     case widgets = "Widgets"
-    case keymaps = "Keymaps"
     case palettes = "Palettes"
     case passwords = "Password Manager"
     case updates = "Updates"
+
+    /// The sidebar's groups, separated by a gap: the app itself, then the
+    /// things it puts on screen beyond the terminal window, then updates.
+    static let groups: [[SettingsPane]] = [
+        [.general, .projects, .appearance, .animations, .keymaps],
+        [.quickTerminal, .widgets, .palettes, .passwords],
+        [.updates],
+    ]
 
     var id: String { rawValue }
     var title: String { rawValue }
@@ -56,9 +64,15 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            List(SettingsPane.allCases, selection: $selection) { pane in
-                NavigationLink(value: pane) {
-                    Label(pane.title, systemImage: pane.symbol)
+            List(selection: $selection) {
+                ForEach(Array(SettingsPane.groups.enumerated()), id: \.offset) { _, group in
+                    Section {
+                        ForEach(group) { pane in
+                            NavigationLink(value: pane) {
+                                Label(pane.title, systemImage: pane.symbol)
+                            }
+                        }
+                    }
                 }
             }
             .navigationSplitViewColumnWidth(Self.sidebarWidth)
@@ -1710,8 +1724,11 @@ private struct KeymapSettings: View {
                     Text("No keybinds match “\(query.trimmingCharacters(in: .whitespaces))”.")
                         .foregroundStyle(.secondary)
                 }
+                if !actionsByCategory.isEmpty {
+                    columnHeader
+                }
                 ForEach(actionsByCategory, id: \.category) { group in
-                    columnHeader(group.category.rawValue)
+                    sectionLabel(group.category.rawValue)
                     ForEach(group.actions) { action in
                         hotkeyRow(action)
                     }
@@ -1752,6 +1769,11 @@ private struct KeymapSettings: View {
                 flags[action.id] = HotkeyRegistry.passesThroughToPrograms(for: action)
                 globals[action.id] = HotkeyRegistry.isGlobal(action)
             }
+            for paletteID in PaletteHotkeys.shared.paletteIDs {
+                let rowID = PaletteHotkeys.rowID(paletteID: paletteID)
+                flags[rowID] = PaletteHotkeys.shared.passesThrough(paletteID: paletteID)
+                globals[rowID] = PaletteHotkeys.shared.isGlobal(paletteID: paletteID)
+            }
             values = map.merging(PaletteHotkeys.shared.shortcutStringsByRowID()) { _, palette in palette }
             passthrough = flags
             global = globals
@@ -1782,15 +1804,20 @@ private struct KeymapSettings: View {
         }
     }
 
-    /// A category's divider row: its name where the rows' titles go, over
-    /// the three column names. Repeated per category rather than once per
-    /// pane because a long list scrolls them away, and a header that has
-    /// scrolled away explains nothing.
-    private func columnHeader(_ category: String) -> some View {
+    /// A category's divider inside the block: its name alone, small and
+    /// gray, where the rows' titles go.
+    private func sectionLabel(_ category: String) -> some View {
+        Text(category)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The one header row of the table, under the search: the three column
+    /// names over the boxes every row lines its controls up in.
+    private var columnHeader: some View {
         HStack(spacing: Self.columnGap) {
-            Text(category)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
+            Text("Action")
             Spacer(minLength: 0)
             Text(Self.globalTitle)
                 .frame(width: Self.globalColumn, alignment: .center)
@@ -1827,10 +1854,31 @@ private struct KeymapSettings: View {
         )
     }
 
-    /// A custom palette's row: the same five children as `hotkeyRow`, with
-    /// the Global and Pass to TUI boxes left empty — a palette's chord is
-    /// local only (`PaletteHotkeys`) — so its columns line up with the
-    /// header and every action row.
+    private func palettePassthroughBinding(_ paletteID: String) -> Binding<Bool> {
+        let rowID = PaletteHotkeys.rowID(paletteID: paletteID)
+        return Binding(
+            get: { passthrough[rowID] ?? false },
+            set: { enabled in
+                passthrough[rowID] = enabled
+                PaletteHotkeys.shared.setPassesThrough(enabled, paletteID: paletteID)
+            }
+        )
+    }
+
+    private func paletteGlobalBinding(_ paletteID: String) -> Binding<Bool> {
+        let rowID = PaletteHotkeys.rowID(paletteID: paletteID)
+        return Binding(
+            get: { global[rowID] ?? false },
+            set: { enabled in
+                global[rowID] = enabled
+                PaletteHotkeys.shared.setGlobal(enabled, paletteID: paletteID)
+            }
+        )
+    }
+
+    /// A custom palette's row: the same five children as `hotkeyRow`, its
+    /// flags kept by `PaletteHotkeys`, so its columns line up with the header
+    /// and every action row.
     @ViewBuilder
     private func customPaletteRow(_ entry: CustomPaletteStore.Entry) -> some View {
         let rowID = PaletteHotkeys.rowID(paletteID: entry.id)
@@ -1841,8 +1889,16 @@ private struct KeymapSettings: View {
             HStack(spacing: Self.columnGap) {
                 Text(entry.pill.title)
                 Spacer(minLength: 0)
-                Spacer().frame(width: Self.globalColumn)
-                Spacer().frame(width: Self.passthroughColumn)
+                Toggle("", isOn: paletteGlobalBinding(entry.id))
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                    .frame(width: Self.globalColumn, alignment: .center)
+                    .help(Self.globalHelp)
+                Toggle("", isOn: palettePassthroughBinding(entry.id))
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                    .frame(width: Self.passthroughColumn, alignment: .center)
+                    .help(Self.passthroughHelp)
                 Button {
                     HotkeyCaptureState.shared.isCapturing = true
                     capturingActionID = rowID
@@ -1879,6 +1935,11 @@ private struct KeymapSettings: View {
             }
             if !partners.isEmpty {
                 Text("Conflicts with \(partners.joined(separator: ", "))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(MactermTheme.warning)
+            }
+            if let refusal = globalHotkeys.refusals[.palette(entry.id)] {
+                Text(refusal.message)
                     .font(.system(size: 11))
                     .foregroundStyle(MactermTheme.warning)
             }
@@ -1972,7 +2033,7 @@ private struct KeymapSettings: View {
             // than left silent: the binding still works inside Macterm, so
             // nothing looks broken until the user tries it from another app —
             // where the keystroke never reaches us at all.
-            if let refusal = globalHotkeys.refusals[action] {
+            if let refusal = globalHotkeys.refusals[.action(action)] {
                 Text(refusal.message)
                     .font(.system(size: 11))
                     .foregroundStyle(MactermTheme.warning)
